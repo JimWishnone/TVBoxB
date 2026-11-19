@@ -1,0 +1,17 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg t="1795057823271" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="3015" xmlns:xlink="http://www.w3.org/1999/xlink" width="1024" height="1024">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#2C365E"/>
+<stop offset="1" stop-color="#151A33"/>
+</linearGradient>
+</defs>
+<rect x="0" y="0" width="1024" height="1024" fill="url(#bg)"/>
+<g transform="translate(512.67 512.385) scale(1.25) translate(-512.67 -512.385)">
+<path d="M706.63 204.41l-96.97 55.99h-0.02l-96.97 55.99h-0.02l-96.97 56.01-96.99-56v-0.01l96.99-55.99 96.97-55.99h0.02v-0.02l96.97-55.99 0.02 0.01z" fill="#7DDBD2" p-id="3016"></path>
+<path d="M415.68 484.38v0.01l-96.99-56V316.4l96.99 56z" fill="#3D827B" p-id="3017"></path>
+<path d="M512.67 428.39v447.98l-96.99-56V484.38l96.97-55.99z" fill="#3D827B" p-id="3018"></path>
+<path d="M706.65 204.41v111.98h-0.02l-96.97 55.99v447.99h-0.02l-96.97 56V428.39h-0.02l-96.97 55.99V372.4l96.97-56.01 0.02 0.01v-0.01l96.97-55.99h0.02l96.97-55.99z" fill="#A4FFF8" p-id="3019"></path>
+</g>
+</svg>
