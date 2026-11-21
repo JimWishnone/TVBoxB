@@ -1,21 +1,5 @@
 #import "ConfigManager.h"
 
-// 配置源地址，依次尝试；前面的失败后自动回退到后面的镜像
-static NSArray<NSString *> *TVBoxConfigURLs(void) {
-    static NSArray<NSString *> *urls = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        urls = @[
-            @"https://cdn.jsdelivr.net/gh/TVboxorg/TVbox@main/dist/official.json",
-            @"https://raw.githubusercontent.com/TVboxorg/TVbox/main/dist/official.json",
-            @"https://ghproxy.net/https://raw.githubusercontent.com/TVboxorg/TVbox/main/dist/official.json",
-            @"https://cdn.jsdelivr.net/gh/TVboxorg/TVbox@main/dist/tvbox.json",
-            @"https://raw.githubusercontent.com/TVboxorg/TVbox/main/dist/tvbox.json",
-        ];
-    });
-    return urls;
-}
-
 static NSString * const kUserConfigURLsKey = @"TVBoxUserConfigURLs";
 static NSString * const kUserLiveConfigURLsKey = @"TVBoxUserLiveConfigURLs";
 
@@ -49,9 +33,27 @@ static NSInteger MMInteger(id value) {
 }
 
 - (void)loadConfigWithCompletion:(void (^)(NSError * _Nullable))completion {
+    NSArray<NSString *> *vodURLs = [self configURLs];
+    NSArray<NSString *> *liveURLs = [self liveConfigURLs];
+
+    // 未设置点播数据源时，仅清空点播站点，仍可单独使用专属直播数据源
+    if (vodURLs.count == 0) {
+        self.vodSites = @[];
+        self.parses = @[];
+        if (liveURLs.count == 0) {
+            self.liveSources = @[];
+            if (completion) completion(nil);
+            return;
+        }
+        [self loadLiveConfigFromURLs:liveURLs index:0 completion:^(NSError * _Nullable liveError) {
+            // 直播源加载失败不影响点播（此时无点播源），仍以 nil 结束加载流程
+            if (completion) completion(nil);
+        }];
+        return;
+    }
+
     // 先加载主数据源（点播站点 + 作为回退的直播源 + 解析接口）
-    [self loadConfigFromURLs:[self configURLs] index:0 completion:^(NSError * _Nullable vodError) {
-        NSArray<NSString *> *liveURLs = [self liveConfigURLs];
+    [self loadConfigFromURLs:vodURLs index:0 completion:^(NSError * _Nullable vodError) {
         if (liveURLs.count == 0) {
             // 未设置专属直播数据源，沿用主数据源中的直播源
             if (completion) completion(vodError);
@@ -73,8 +75,7 @@ static NSInteger MMInteger(id value) {
         NSString *trimmed = [url stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if (trimmed.length > 0) [valid addObject:trimmed];
     }
-    if (valid.count > 0) return valid;
-    return TVBoxConfigURLs();
+    return valid;
 }
 
 - (void)saveConfigURLs:(NSArray<NSString *> *)urls {
@@ -120,6 +121,56 @@ static NSInteger MMInteger(id value) {
 
 - (void)resetLiveConfigURLs {
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:kUserLiveConfigURLsKey];
+}
+
+// 验证点播配置 URL：可访问、可解析、且是 TVBox 支持的配置格式。
+// 成功时返回该配置中包含的直播源数组（可能为空数组）；失败时返回 error。
+- (void)validateVODConfigURL:(NSString *)urlString completion:(void (^)(NSArray<TVLiveSource *> * _Nullable liveSources, NSError * _Nullable error))completion {
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (!url) {
+        NSError *error = [NSError errorWithDomain:@"TVBox"
+                                             code:-10
+                                         userInfo:@{NSLocalizedDescriptionKey: @"地址格式不正确"}];
+        if (completion) completion(nil, error);
+        return;
+    }
+
+    NSMutableDictionary *collector = [NSMutableDictionary dictionary];
+    collector[@"sites"] = [NSMutableArray array];
+    collector[@"lives"] = [NSMutableArray array];
+    collector[@"parses"] = [NSMutableArray array];
+
+    [self collectConfigFromURL:url depth:0 collector:collector completion:^(NSError * _Nullable error) {
+        if (error) {
+            if (completion) completion(nil, error);
+            return;
+        }
+
+        NSArray *sites = [self arrayValue:collector[@"sites"]];
+        NSArray *lives = [self arrayValue:collector[@"lives"]];
+
+        // TVBox 支持的格式：至少包含一个苹果 CMS 点播站点或一个直播源
+        BOOL hasVodSite = NO;
+        for (id item in sites) {
+            if (![item isKindOfClass:[NSDictionary class]]) continue;
+            NSDictionary *s = (NSDictionary *)item;
+            if (MMInteger(s[@"type"]) == 1 && MMString(s[@"api"]).length > 0) {
+                hasVodSite = YES;
+                break;
+            }
+        }
+        BOOL hasLive = (lives.count > 0);
+        if (!hasVodSite && !hasLive) {
+            NSError *error = [NSError errorWithDomain:@"TVBox"
+                                                 code:-11
+                                             userInfo:@{NSLocalizedDescriptionKey: @"该地址不是有效的 TVBox 配置（未找到点播或直播数据源）"}];
+            if (completion) completion(nil, error);
+            return;
+        }
+
+        NSArray<TVLiveSource *> *liveSources = [self parseLiveSourcesFromArray:lives];
+        if (completion) completion(liveSources, nil);
+    }];
 }
 
 // 加载专属直播数据源：既可以是 JSON 配置（含 lives / urls），也可以是 m3u / DIYP 文本列表

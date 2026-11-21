@@ -1,10 +1,14 @@
 #import "MainViewController.h"
 #import "ConfigManager.h"
 #import "PlayerViewController.h"
+#import <QuartzCore/QuartzCore.h>
+#import <CoreImage/CoreImage.h>
 
 static NSString *const kVODItemIdentifier = @"VODItemIdentifier";
 static NSString *const kTVBoxHistoryKey = @"TVBoxHistory";
+static NSString *const kTVBoxSearchKeywordsKey = @"TVBoxSearchKeywords";
 static const NSUInteger kTVBoxHistoryLimit = 30;
+static const NSUInteger kTVBoxSearchKeywordsLimit = 12;
 
 @interface TVPosterImageView : NSImageView
 @end
@@ -20,6 +24,39 @@ static const NSUInteger kTVBoxHistoryLimit = 30;
 - (NSView *)hitTest:(NSPoint)point {
     return nil;
 }
+@end
+
+// 渐变背景视图：使用 CAGradientLayer 绘制上下渐变色，用于增强界面视觉效果。
+@interface TVGradientView : NSView
+- (instancetype)initWithColors:(NSArray<NSColor *> *)colors;
+@end
+
+@implementation TVGradientView {
+    CAGradientLayer *_gradient;
+}
+
+- (instancetype)initWithColors:(NSArray<NSColor *> *)colors {
+    self = [super initWithFrame:NSZeroRect];
+    if (self) {
+        self.wantsLayer = YES;
+        _gradient = [CAGradientLayer layer];
+        NSMutableArray<id> *cgColors = [NSMutableArray array];
+        for (NSColor *color in colors) {
+            [cgColors addObject:(id)color.CGColor];
+        }
+        _gradient.colors = cgColors;
+        _gradient.startPoint = CGPointMake(0.5, 1.0);
+        _gradient.endPoint = CGPointMake(0.5, 0.0);
+        [self.layer addSublayer:_gradient];
+    }
+    return self;
+}
+
+- (void)layout {
+    [super layout];
+    _gradient.frame = self.bounds;
+}
+
 @end
 
 static NSString *TVFirstCharacter(NSString *name) {
@@ -46,6 +83,51 @@ static NSImage *TVLetterIcon(NSString *name) {
          withAttributes:attrs];
     [image unlockFocus];
     return image;
+}
+
+static NSLayoutConstraint *TVSoftMinWidthConstraint(NSLayoutDimension *dimension, CGFloat minimum) {
+    NSLayoutConstraint *constraint = [dimension constraintGreaterThanOrEqualToConstant:minimum];
+    constraint.priority = NSLayoutPriorityDefaultHigh;
+    return constraint;
+}
+
+// 降低视图水平方向的内容压缩抗性。fittingSize 以 NSLayoutPriorityFittingSizeCompression(50)
+// 作为约束求解优先级，因此压缩抗性必须低于该值，控件的固有宽度才不会锁死窗口最小宽度。
+static void TVAllowHorizontalCompression(NSView *view) {
+    [view setContentCompressionResistancePriority:(NSLayoutPriorityFittingSizeCompression - 1)
+                                    forOrientation:NSLayoutConstraintOrientationHorizontal];
+}
+
+// 计算两个字符串的编辑距离（Levenshtein），用于搜索结果相似度排序
+static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
+    NSUInteger lenA = a.length;
+    NSUInteger lenB = b.length;
+    if (lenA == 0) return lenB;
+    if (lenB == 0) return lenA;
+
+    NSUInteger *prev = (NSUInteger *)calloc(lenB + 1, sizeof(NSUInteger));
+    NSUInteger *curr = (NSUInteger *)calloc(lenB + 1, sizeof(NSUInteger));
+    for (NSUInteger j = 0; j <= lenB; j++) prev[j] = j;
+
+    for (NSUInteger i = 1; i <= lenA; i++) {
+        curr[0] = i;
+        unichar ca = [a characterAtIndex:i - 1];
+        for (NSUInteger j = 1; j <= lenB; j++) {
+            unichar cb = [b characterAtIndex:j - 1];
+            NSUInteger cost = (ca == cb) ? 0 : 1;
+            NSUInteger deletion = prev[j] + 1;
+            NSUInteger insertion = curr[j - 1] + 1;
+            NSUInteger substitution = prev[j - 1] + cost;
+            curr[j] = MIN(MIN(deletion, insertion), substitution);
+        }
+        NSUInteger *tmp = prev;
+        prev = curr;
+        curr = tmp;
+    }
+    NSUInteger result = prev[lenB];
+    free(prev);
+    free(curr);
+    return result;
 }
 
 @interface TVLiveIconCell : NSTableCellView
@@ -93,7 +175,7 @@ static NSImage *TVLetterIcon(NSString *name) {
     self.posterView.wantsLayer = YES;
     self.posterView.layer.cornerRadius = 6;
     self.posterView.layer.masksToBounds = YES;
-    self.posterView.layer.backgroundColor = [NSColor colorWithWhite:0.86 alpha:1.0].CGColor;
+    self.posterView.layer.backgroundColor = [NSColor clearColor].CGColor;
 
     self.titleLabel = [[TVNonInteractiveLabel alloc] initWithFrame:NSZeroRect];
     self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -164,8 +246,6 @@ static NSImage *TVLetterIcon(NSString *name) {
         NSSize size = NSMakeSize(160, 150);
         image = [[NSImage alloc] initWithSize:size];
         [image lockFocus];
-        [[NSColor colorWithWhite:0.88 alpha:1.0] setFill];
-        NSRectFill(NSMakeRect(0, 0, size.width, size.height));
         NSImage *symbol = [NSImage imageWithSystemSymbolName:@"film" accessibilityDescription:@"默认图片"];
         if (symbol) {
             NSImageSymbolConfiguration *config = [NSImageSymbolConfiguration configurationWithPointSize:42 weight:NSFontWeightRegular];
@@ -233,6 +313,8 @@ static NSImage *TVLetterIcon(NSString *name) {
 @property (nonatomic, strong) NSView *historyView;
 @property (nonatomic, strong) NSView *settingsView;
 @property (nonatomic, strong) NSView *aboutView;
+@property (nonatomic, strong) NSArray<NSView *> *contentViews;
+@property (nonatomic, strong) NSArray<NSArray<NSLayoutConstraint *> *> *contentViewPinConstraints;
 
 @property (nonatomic, strong) NSTableView *sourcesTable;
 @property (nonatomic, strong) NSArray<NSDictionary *> *sourceRows;
@@ -245,6 +327,10 @@ static NSImage *TVLetterIcon(NSString *name) {
 @property (nonatomic, strong) NSArray<TVVideo *> *searchResults;
 @property (nonatomic, strong) NSTimer *searchTimer;
 @property (nonatomic, assign) NSInteger searchGeneration;
+@property (nonatomic, strong) NSMutableArray<NSString *> *searchKeywords;
+@property (nonatomic, strong) NSScrollView *searchKeywordsScroll;
+@property (nonatomic, strong) NSView *searchKeywordsBar;
+@property (nonatomic, strong) NSLayoutConstraint *searchKeywordsHeightConstraint;
 
 @property (nonatomic, strong) NSPopUpButton *sitePopup;
 @property (nonatomic, strong) NSSearchField *vodSearchField;
@@ -268,10 +354,8 @@ static NSImage *TVLetterIcon(NSString *name) {
 @property (nonatomic, strong) NSArray<TVLiveChannel *> *displayedLiveChannels;
 @property (nonatomic, copy) NSSortDescriptor *liveSortDescriptor;
 
-@property (nonatomic, strong) NSTableView *settingsTable;
-@property (nonatomic, strong) NSMutableArray<NSString *> *configURLRows;
-@property (nonatomic, strong) NSTableView *liveSettingsTable;
-@property (nonatomic, strong) NSMutableArray<NSString *> *liveConfigURLRows;
+@property (nonatomic, strong) NSTextField *vodConfigURLField;
+@property (nonatomic, strong) NSTextField *liveConfigURLField;
 
 @property (nonatomic, strong) NSTableView *historyTable;
 @property (nonatomic, strong) NSMutableArray<TVHistoryItem *> *historyItems;
@@ -279,6 +363,13 @@ static NSImage *TVLetterIcon(NSString *name) {
 
 @property (nonatomic, strong) NSWindow *playerWindow;
 @property (nonatomic, strong) NSTextField *statusLabel;
+
+// 视频详情模态窗口（点播列表点击后展示介绍信息与可播放列表）
+@property (nonatomic, strong) NSWindow *detailModalWindow;
+@property (nonatomic, strong) NSPopUpButton *detailModalLinePopup;
+@property (nonatomic, strong) NSPopUpButton *detailModalEpisodePopup;
+@property (nonatomic, strong) TVVideo *detailModalVideo;
+@property (nonatomic, strong) TVSite *detailModalSite;
 
 @end
 
@@ -297,13 +388,13 @@ static NSImage *TVLetterIcon(NSString *name) {
     self.displayedLiveChannels = @[];
     self.sourceRows = @[];
     self.unavailableSourceURLs = [NSMutableSet set];
-    self.configURLRows = [NSMutableArray array];
-    self.liveConfigURLRows = [NSMutableArray array];
     self.selectedCategoryId = 0;
     self.historyItems = [NSMutableArray array];
 
     [self buildUI];
     [self loadHistory];
+    [self loadSearchKeywords];
+    [self rebuildSearchKeywordsBar];
 
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(handleReloadConfig:)
@@ -335,18 +426,29 @@ static NSImage *TVLetterIcon(NSString *name) {
     self.contentContainer.translatesAutoresizingMaskIntoConstraints = NO;
     [root addSubview:self.contentContainer];
 
-    NSArray<NSView *> *contentViews = @[self.dataSourcesView, self.searchView, self.vodView,
-                                        self.liveView, self.historyView, self.settingsView, self.aboutView];
-    for (NSView *view in contentViews) {
+    self.contentViews = @[self.dataSourcesView, self.searchView, self.vodView,
+                          self.liveView, self.historyView, self.settingsView, self.aboutView];
+    NSMutableArray<NSArray<NSLayoutConstraint *> *> *pinSets = [NSMutableArray array];
+    for (NSView *view in self.contentViews) {
         view.translatesAutoresizingMaskIntoConstraints = NO;
         [self.contentContainer addSubview:view];
-        [NSLayoutConstraint activateConstraints:@[
+        NSArray<NSLayoutConstraint *> *pins = @[
             [view.topAnchor constraintEqualToAnchor:self.contentContainer.topAnchor],
             [view.leadingAnchor constraintEqualToAnchor:self.contentContainer.leadingAnchor],
             [view.trailingAnchor constraintEqualToAnchor:self.contentContainer.trailingAnchor],
             [view.bottomAnchor constraintEqualToAnchor:self.contentContainer.bottomAnchor],
-        ]];
+        ];
+        [pinSets addObject:pins];
     }
+    self.contentViewPinConstraints = pinSets;
+
+    // 侧边栏使用彩色渐变色背景，提升视觉效果，同时保持默认 macOS 界面风格。
+    TVGradientView *sidebarBackground = [[TVGradientView alloc] initWithColors:@[
+        [NSColor colorWithCalibratedRed:0.80 green:0.86 blue:0.98 alpha:1.0],
+        [NSColor colorWithCalibratedRed:0.98 green:0.86 blue:0.96 alpha:1.0],
+    ]];
+    sidebarBackground.translatesAutoresizingMaskIntoConstraints = NO;
+    [root addSubview:sidebarBackground];
 
     NSScrollView *sidebarScroll = [[NSScrollView alloc] init];
     sidebarScroll.translatesAutoresizingMaskIntoConstraints = NO;
@@ -366,9 +468,15 @@ static NSImage *TVLetterIcon(NSString *name) {
     self.statusLabel.textColor = [NSColor secondaryLabelColor];
     self.statusLabel.font = [NSFont systemFontOfSize:12];
     self.statusLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    TVAllowHorizontalCompression(self.statusLabel);
     [root addSubview:self.statusLabel];
 
     [NSLayoutConstraint activateConstraints:@[
+        [sidebarBackground.topAnchor constraintEqualToAnchor:root.topAnchor],
+        [sidebarBackground.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
+        [sidebarBackground.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
+        [sidebarBackground.widthAnchor constraintEqualToConstant:200],
+
         [sidebarScroll.topAnchor constraintEqualToAnchor:root.topAnchor],
         [sidebarScroll.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
         [sidebarScroll.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
@@ -427,6 +535,8 @@ static NSImage *TVLetterIcon(NSString *name) {
     self.sourcesTable.usesAlternatingRowBackgroundColors = YES;
     self.sourcesTable.allowsColumnResizing = YES;
     self.sourcesTable.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
+    self.sourcesTable.target = self;
+    self.sourcesTable.doubleAction = @selector(sourceRowDoubleClicked:);
 
     NSTableColumn *nameCol = [[NSTableColumn alloc] initWithIdentifier:@"name"];
     nameCol.title = @"名称";
@@ -479,6 +589,8 @@ static NSImage *TVLetterIcon(NSString *name) {
 
     self.searchField = [[NSSearchField alloc] init];
     self.searchField.placeholderString = @"搜索片名（在所有数据源中）";
+    self.searchField.font = [NSFont systemFontOfSize:16];
+    self.searchField.controlSize = NSControlSizeLarge;
     self.searchField.delegate = self;
     [self.searchField setTarget:self];
     [self.searchField setAction:@selector(searchAction:)];
@@ -492,21 +604,41 @@ static NSImage *TVLetterIcon(NSString *name) {
     toolbar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     toolbar.spacing = 8;
     toolbar.translatesAutoresizingMaskIntoConstraints = NO;
+    TVAllowHorizontalCompression(self.searchField);
+    TVAllowHorizontalCompression(toolbar);
 
     self.searchCollectionView = [self makeCollectionView];
     NSScrollView *gridScroll = [self makeScrollViewForCollectionView:self.searchCollectionView];
 
+    // 搜索关键词历史条（可点击回填、可删除）
+    self.searchKeywordsScroll = [[NSScrollView alloc] init];
+    self.searchKeywordsScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    self.searchKeywordsScroll.hasVerticalScroller = NO;
+    self.searchKeywordsScroll.hasHorizontalScroller = YES;
+    self.searchKeywordsScroll.autohidesScrollers = YES;
+    self.searchKeywordsScroll.drawsBackground = NO;
+    self.searchKeywordsBar = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 0, 34)];
+    self.searchKeywordsScroll.documentView = self.searchKeywordsBar;
+
     [container addSubview:toolbar];
+    [container addSubview:self.searchKeywordsScroll];
     [container addSubview:gridScroll];
+
+    self.searchKeywordsHeightConstraint = [self.searchKeywordsScroll.heightAnchor constraintEqualToConstant:0];
 
     [NSLayoutConstraint activateConstraints:@[
         [toolbar.topAnchor constraintEqualToAnchor:container.topAnchor constant:12],
         [toolbar.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:12],
         [toolbar.trailingAnchor constraintLessThanOrEqualToAnchor:container.trailingAnchor constant:-12],
 
-        [self.searchField.widthAnchor constraintEqualToConstant:260],
+        TVSoftMinWidthConstraint(self.searchField.widthAnchor, 100),
 
-        [gridScroll.topAnchor constraintEqualToAnchor:toolbar.bottomAnchor constant:10],
+        [self.searchKeywordsScroll.topAnchor constraintEqualToAnchor:toolbar.bottomAnchor constant:8],
+        [self.searchKeywordsScroll.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:12],
+        [self.searchKeywordsScroll.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-12],
+        self.searchKeywordsHeightConstraint,
+
+        [gridScroll.topAnchor constraintEqualToAnchor:self.searchKeywordsScroll.bottomAnchor constant:8],
         [gridScroll.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
         [gridScroll.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
         [gridScroll.bottomAnchor constraintEqualToAnchor:container.bottomAnchor],
@@ -524,6 +656,8 @@ static NSImage *TVLetterIcon(NSString *name) {
 
     self.vodSearchField = [[NSSearchField alloc] init];
     self.vodSearchField.placeholderString = @"在所选数据源中搜索";
+    self.vodSearchField.font = [NSFont systemFontOfSize:16];
+    self.vodSearchField.controlSize = NSControlSizeLarge;
     [self.vodSearchField setTarget:self];
     [self.vodSearchField setAction:@selector(vodSearchAction:)];
 
@@ -536,6 +670,9 @@ static NSImage *TVLetterIcon(NSString *name) {
     toolbar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     toolbar.spacing = 8;
     toolbar.translatesAutoresizingMaskIntoConstraints = NO;
+    TVAllowHorizontalCompression(self.sitePopup);
+    TVAllowHorizontalCompression(self.vodSearchField);
+    TVAllowHorizontalCompression(toolbar);
 
     self.categoryScroll = [[NSScrollView alloc] init];
     self.categoryScroll.translatesAutoresizingMaskIntoConstraints = NO;
@@ -563,8 +700,8 @@ static NSImage *TVLetterIcon(NSString *name) {
         [toolbar.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:12],
         [toolbar.trailingAnchor constraintLessThanOrEqualToAnchor:container.trailingAnchor constant:-12],
 
-        [self.sitePopup.widthAnchor constraintGreaterThanOrEqualToConstant:180],
-        [self.vodSearchField.widthAnchor constraintEqualToConstant:200],
+        TVSoftMinWidthConstraint(self.sitePopup.widthAnchor, 80),
+        TVSoftMinWidthConstraint(self.vodSearchField.widthAnchor, 80),
 
         [self.categoryScroll.topAnchor constraintEqualToAnchor:toolbar.bottomAnchor constant:8],
         [self.categoryScroll.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
@@ -584,6 +721,13 @@ static NSImage *TVLetterIcon(NSString *name) {
 
     NSTextField *title = [NSTextField labelWithString:@"直播频道"];
     title.font = [NSFont systemFontOfSize:18 weight:NSFontWeightSemibold];
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSButton *reloadButton = [NSButton buttonWithTitle:@"刷新" target:self action:@selector(reloadLiveAction:)];
+    reloadButton.bezelStyle = NSBezelStyleRounded;
+    reloadButton.image = [NSImage imageWithSystemSymbolName:@"arrow.clockwise" accessibilityDescription:@"刷新"];
+    reloadButton.imagePosition = NSImageLeading;
+    reloadButton.translatesAutoresizingMaskIntoConstraints = NO;
 
     NSTextField *sourceLabel = [NSTextField labelWithString:@"直播源:"];
     self.liveSourcePopup = [[NSPopUpButton alloc] init];
@@ -596,21 +740,22 @@ static NSImage *TVLetterIcon(NSString *name) {
     [self.liveGroupPopup setAction:@selector(liveGroupChanged:)];
     [self.liveGroupPopup addItemWithTitle:@"全部分组"];
 
-    NSButton *reloadButton = [NSButton buttonWithTitle:@"刷新" target:self action:@selector(reloadLiveAction:)];
-    reloadButton.bezelStyle = NSBezelStyleRounded;
-    reloadButton.image = [NSImage imageWithSystemSymbolName:@"arrow.clockwise" accessibilityDescription:@"刷新"];
-    reloadButton.imagePosition = NSImageLeading;
-
     self.liveSearchField = [[NSSearchField alloc] init];
     self.liveSearchField.placeholderString = @"按频道名称查找";
+    self.liveSearchField.font = [NSFont systemFontOfSize:16];
+    self.liveSearchField.controlSize = NSControlSizeLarge;
     self.liveSearchField.sendsSearchStringImmediately = YES;
     self.liveSearchField.target = self;
     self.liveSearchField.action = @selector(liveSearchChanged:);
 
-    NSStackView *toolbar = [NSStackView stackViewWithViews:@[title, sourceLabel, self.liveSourcePopup, groupLabel, self.liveGroupPopup, reloadButton, self.liveSearchField]];
+    NSStackView *toolbar = [NSStackView stackViewWithViews:@[sourceLabel, self.liveSourcePopup, groupLabel, self.liveGroupPopup, self.liveSearchField]];
     toolbar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    toolbar.spacing = 12;
+    toolbar.spacing = 8;
     toolbar.translatesAutoresizingMaskIntoConstraints = NO;
+    TVAllowHorizontalCompression(self.liveSourcePopup);
+    TVAllowHorizontalCompression(self.liveGroupPopup);
+    TVAllowHorizontalCompression(self.liveSearchField);
+    TVAllowHorizontalCompression(toolbar);
 
     self.liveTable = [[NSTableView alloc] initWithFrame:NSZeroRect];
     self.liveTable.identifier = @"live";
@@ -666,17 +811,25 @@ static NSImage *TVLetterIcon(NSString *name) {
     tableScroll.autohidesScrollers = YES;
     tableScroll.documentView = self.liveTable;
 
+    [container addSubview:title];
+    [container addSubview:reloadButton];
     [container addSubview:toolbar];
     [container addSubview:tableScroll];
 
     [NSLayoutConstraint activateConstraints:@[
-        [toolbar.topAnchor constraintEqualToAnchor:container.topAnchor constant:12],
+        [title.topAnchor constraintEqualToAnchor:container.topAnchor constant:12],
+        [title.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:12],
+
+        [reloadButton.centerYAnchor constraintEqualToAnchor:title.centerYAnchor],
+        [reloadButton.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-12],
+
+        [toolbar.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:10],
         [toolbar.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:12],
         [toolbar.trailingAnchor constraintLessThanOrEqualToAnchor:container.trailingAnchor constant:-12],
 
-        [self.liveSourcePopup.widthAnchor constraintGreaterThanOrEqualToConstant:220],
-        [self.liveGroupPopup.widthAnchor constraintGreaterThanOrEqualToConstant:120],
-        [self.liveSearchField.widthAnchor constraintGreaterThanOrEqualToConstant:160],
+        TVSoftMinWidthConstraint(self.liveSourcePopup.widthAnchor, 80),
+        TVSoftMinWidthConstraint(self.liveGroupPopup.widthAnchor, 60),
+        TVSoftMinWidthConstraint(self.liveSearchField.widthAnchor, 80),
 
         [tableScroll.topAnchor constraintEqualToAnchor:toolbar.bottomAnchor constant:10],
         [tableScroll.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:12],
@@ -773,108 +926,35 @@ static NSImage *TVLetterIcon(NSString *name) {
     title.font = [NSFont systemFontOfSize:18 weight:NSFontWeightSemibold];
     title.translatesAutoresizingMaskIntoConstraints = NO;
 
-    NSTextField *hintLabel = [NSTextField labelWithString:@"视频数据源分为两个部分：点播数据源（主数据源，必填）与直播视频源（专属直播的数据源，选填）。直接点击地址单元格即可编辑，修改后点击「保存并重新加载」立即生效。"];
+    NSTextField *hintLabel = [NSTextField labelWithString:@"视频数据源分为两个部分：点播数据源（主数据源，必填）与直播视频源（专属直播的数据源，选填）。点播数据源仅支持填写一个 URL，保存前会进行可访问、可解析验证；若该地址包含直播数据源，可从中选择一个保存到直播数据源。修改后点击「保存并重新加载」立即生效。"];
     hintLabel.translatesAutoresizingMaskIntoConstraints = NO;
     hintLabel.font = [NSFont systemFontOfSize:12];
     hintLabel.textColor = [NSColor secondaryLabelColor];
-    hintLabel.maximumNumberOfLines = 2;
+    hintLabel.maximumNumberOfLines = 0;
     hintLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    hintLabel.preferredMaxLayoutWidth = 280;
 
     // ---- 点播数据源（主数据源） ----
     NSTextField *vodTitle = [NSTextField labelWithString:@"点播数据源（主数据源）"];
     vodTitle.font = [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold];
     vodTitle.translatesAutoresizingMaskIntoConstraints = NO;
 
-    self.settingsTable = [[NSTableView alloc] initWithFrame:NSZeroRect];
-    self.settingsTable.identifier = @"settings";
-    self.settingsTable.dataSource = self;
-    self.settingsTable.delegate = self;
-    self.settingsTable.usesAlternatingRowBackgroundColors = YES;
-    self.settingsTable.rowHeight = 32;
-    self.settingsTable.intercellSpacing = NSMakeSize(0, 4);
-    self.settingsTable.allowsMultipleSelection = NO;
-    self.settingsTable.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
-
-    NSTableColumn *urlColumn = [[NSTableColumn alloc] initWithIdentifier:@"url"];
-    urlColumn.title = @"数据源配置地址";
-    urlColumn.width = 720;
-    urlColumn.resizingMask = NSTableColumnAutoresizingMask | NSTableColumnUserResizingMask;
-    [self.settingsTable addTableColumn:urlColumn];
-
-    NSScrollView *vodTableScroll = [[NSScrollView alloc] init];
-    vodTableScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    vodTableScroll.hasVerticalScroller = YES;
-    vodTableScroll.autohidesScrollers = YES;
-    vodTableScroll.borderType = NSBezelBorder;
-    vodTableScroll.documentView = self.settingsTable;
-
-    NSButton *addButton = [NSButton buttonWithTitle:@"添加" target:self action:@selector(addConfigURLAction:)];
-    addButton.bezelStyle = NSBezelStyleRounded;
-    addButton.image = [NSImage imageWithSystemSymbolName:@"plus" accessibilityDescription:@"添加"];
-    addButton.imagePosition = NSImageLeading;
-
-    NSButton *deleteButton = [NSButton buttonWithTitle:@"删除" target:self action:@selector(deleteConfigURLAction:)];
-    deleteButton.bezelStyle = NSBezelStyleRounded;
-    deleteButton.image = [NSImage imageWithSystemSymbolName:@"minus" accessibilityDescription:@"删除"];
-    deleteButton.imagePosition = NSImageLeading;
-
-    NSButton *resetButton = [NSButton buttonWithTitle:@"恢复默认" target:self action:@selector(resetConfigURLAction:)];
-    resetButton.bezelStyle = NSBezelStyleRounded;
-    resetButton.image = [NSImage imageWithSystemSymbolName:@"arrow.counterclockwise" accessibilityDescription:@"恢复默认"];
-    resetButton.imagePosition = NSImageLeading;
-
-    NSStackView *vodButtonBar = [NSStackView stackViewWithViews:@[addButton, deleteButton, resetButton]];
-    vodButtonBar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    vodButtonBar.spacing = 12;
-    vodButtonBar.translatesAutoresizingMaskIntoConstraints = NO;
+    self.vodConfigURLField = [NSTextField textFieldWithString:@""];
+    self.vodConfigURLField.placeholderString = @"请输入点播数据源 URL，例如 https://…";
+    self.vodConfigURLField.font = [NSFont systemFontOfSize:16];
+    self.vodConfigURLField.controlSize = NSControlSizeLarge;
+    self.vodConfigURLField.translatesAutoresizingMaskIntoConstraints = NO;
 
     // ---- 直播视频源（专属直播的数据源，选填） ----
     NSTextField *liveTitle = [NSTextField labelWithString:@"直播视频源（专属直播的数据源，选填）"];
     liveTitle.font = [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold];
     liveTitle.translatesAutoresizingMaskIntoConstraints = NO;
 
-    self.liveSettingsTable = [[NSTableView alloc] initWithFrame:NSZeroRect];
-    self.liveSettingsTable.identifier = @"liveSettings";
-    self.liveSettingsTable.dataSource = self;
-    self.liveSettingsTable.delegate = self;
-    self.liveSettingsTable.usesAlternatingRowBackgroundColors = YES;
-    self.liveSettingsTable.rowHeight = 32;
-    self.liveSettingsTable.intercellSpacing = NSMakeSize(0, 4);
-    self.liveSettingsTable.allowsMultipleSelection = NO;
-    self.liveSettingsTable.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
-
-    NSTableColumn *liveURLColumn = [[NSTableColumn alloc] initWithIdentifier:@"url"];
-    liveURLColumn.title = @"直播数据源配置地址";
-    liveURLColumn.width = 720;
-    liveURLColumn.resizingMask = NSTableColumnAutoresizingMask | NSTableColumnUserResizingMask;
-    [self.liveSettingsTable addTableColumn:liveURLColumn];
-
-    NSScrollView *liveTableScroll = [[NSScrollView alloc] init];
-    liveTableScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    liveTableScroll.hasVerticalScroller = YES;
-    liveTableScroll.autohidesScrollers = YES;
-    liveTableScroll.borderType = NSBezelBorder;
-    liveTableScroll.documentView = self.liveSettingsTable;
-
-    NSButton *addLiveButton = [NSButton buttonWithTitle:@"添加" target:self action:@selector(addLiveConfigURLAction:)];
-    addLiveButton.bezelStyle = NSBezelStyleRounded;
-    addLiveButton.image = [NSImage imageWithSystemSymbolName:@"plus" accessibilityDescription:@"添加"];
-    addLiveButton.imagePosition = NSImageLeading;
-
-    NSButton *deleteLiveButton = [NSButton buttonWithTitle:@"删除" target:self action:@selector(deleteLiveConfigURLAction:)];
-    deleteLiveButton.bezelStyle = NSBezelStyleRounded;
-    deleteLiveButton.image = [NSImage imageWithSystemSymbolName:@"minus" accessibilityDescription:@"删除"];
-    deleteLiveButton.imagePosition = NSImageLeading;
-
-    NSButton *clearLiveButton = [NSButton buttonWithTitle:@"清空" target:self action:@selector(clearLiveConfigURLAction:)];
-    clearLiveButton.bezelStyle = NSBezelStyleRounded;
-    clearLiveButton.image = [NSImage imageWithSystemSymbolName:@"trash" accessibilityDescription:@"清空"];
-    clearLiveButton.imagePosition = NSImageLeading;
-
-    NSStackView *liveButtonBar = [NSStackView stackViewWithViews:@[addLiveButton, deleteLiveButton, clearLiveButton]];
-    liveButtonBar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    liveButtonBar.spacing = 12;
-    liveButtonBar.translatesAutoresizingMaskIntoConstraints = NO;
+    self.liveConfigURLField = [NSTextField textFieldWithString:@""];
+    self.liveConfigURLField.placeholderString = @"请输入直播视频源 URL（选填）";
+    self.liveConfigURLField.font = [NSFont systemFontOfSize:16];
+    self.liveConfigURLField.controlSize = NSControlSizeLarge;
+    self.liveConfigURLField.translatesAutoresizingMaskIntoConstraints = NO;
 
     // ---- 保存 ----
     NSButton *saveButton = [NSButton buttonWithTitle:@"保存并重新加载" target:self action:@selector(saveConfigURLAction:)];
@@ -886,11 +966,9 @@ static NSImage *TVLetterIcon(NSString *name) {
     [container addSubview:title];
     [container addSubview:hintLabel];
     [container addSubview:vodTitle];
-    [container addSubview:vodTableScroll];
-    [container addSubview:vodButtonBar];
+    [container addSubview:self.vodConfigURLField];
     [container addSubview:liveTitle];
-    [container addSubview:liveTableScroll];
-    [container addSubview:liveButtonBar];
+    [container addSubview:self.liveConfigURLField];
     [container addSubview:saveButton];
 
     [NSLayoutConstraint activateConstraints:@[
@@ -899,33 +977,23 @@ static NSImage *TVLetterIcon(NSString *name) {
 
         [hintLabel.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:10],
         [hintLabel.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
-        [hintLabel.trailingAnchor constraintLessThanOrEqualToAnchor:container.trailingAnchor constant:-16],
+        [hintLabel.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
 
         [vodTitle.topAnchor constraintEqualToAnchor:hintLabel.bottomAnchor constant:18],
         [vodTitle.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
 
-        [vodTableScroll.topAnchor constraintEqualToAnchor:vodTitle.bottomAnchor constant:8],
-        [vodTableScroll.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
-        [vodTableScroll.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
-        [vodTableScroll.heightAnchor constraintEqualToConstant:160],
+        [self.vodConfigURLField.topAnchor constraintEqualToAnchor:vodTitle.bottomAnchor constant:8],
+        [self.vodConfigURLField.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
+        [self.vodConfigURLField.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
 
-        [vodButtonBar.topAnchor constraintEqualToAnchor:vodTableScroll.bottomAnchor constant:10],
-        [vodButtonBar.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
-        [vodButtonBar.trailingAnchor constraintLessThanOrEqualToAnchor:container.trailingAnchor constant:-16],
-
-        [liveTitle.topAnchor constraintEqualToAnchor:vodButtonBar.bottomAnchor constant:20],
+        [liveTitle.topAnchor constraintEqualToAnchor:self.vodConfigURLField.bottomAnchor constant:20],
         [liveTitle.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
 
-        [liveTableScroll.topAnchor constraintEqualToAnchor:liveTitle.bottomAnchor constant:8],
-        [liveTableScroll.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
-        [liveTableScroll.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
-        [liveTableScroll.heightAnchor constraintEqualToConstant:160],
+        [self.liveConfigURLField.topAnchor constraintEqualToAnchor:liveTitle.bottomAnchor constant:8],
+        [self.liveConfigURLField.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
+        [self.liveConfigURLField.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
 
-        [liveButtonBar.topAnchor constraintEqualToAnchor:liveTableScroll.bottomAnchor constant:10],
-        [liveButtonBar.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
-        [liveButtonBar.trailingAnchor constraintLessThanOrEqualToAnchor:container.trailingAnchor constant:-16],
-
-        [saveButton.topAnchor constraintEqualToAnchor:liveButtonBar.bottomAnchor constant:16],
+        [saveButton.topAnchor constraintEqualToAnchor:self.liveConfigURLField.bottomAnchor constant:16],
         [saveButton.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
     ]];
 
@@ -936,25 +1004,101 @@ static NSImage *TVLetterIcon(NSString *name) {
 - (NSView *)buildAboutView {
     NSView *container = [[NSView alloc] init];
 
+    // 关于页使用彩色渐变色背景，增强视觉冲击力。
+    TVGradientView *background = [[TVGradientView alloc] initWithColors:@[
+        [NSColor colorWithCalibratedRed:0.28 green:0.45 blue:0.96 alpha:1.0],
+        [NSColor colorWithCalibratedRed:0.58 green:0.38 blue:0.96 alpha:1.0],
+        [NSColor colorWithCalibratedRed:0.94 green:0.38 blue:0.62 alpha:1.0],
+    ]];
+    background.translatesAutoresizingMaskIntoConstraints = NO;
+    [container addSubview:background];
+
     NSTextField *title = [NSTextField labelWithString:@"TVBoxB"];
     title.font = [NSFont systemFontOfSize:28 weight:NSFontWeightBold];
+    title.textColor = [NSColor whiteColor];
     title.translatesAutoresizingMaskIntoConstraints = NO;
 
     NSTextField *version = [NSTextField labelWithString:@"版本 v0.0.1"];
-    version.textColor = [NSColor secondaryLabelColor];
+    version.textColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.85];
     version.translatesAutoresizingMaskIntoConstraints = NO;
 
     NSTextField *desc = [NSTextField wrappingLabelWithString:@"基于 macOS 原生界面的视频播放软件，支持视频点播与视频直播功能。\n点播与直播数据均来自 TVbox 官方配置源（official.json）。"];
+    desc.textColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.95];
     desc.translatesAutoresizingMaskIntoConstraints = NO;
     desc.maximumNumberOfLines = 0;
     desc.alignment = NSTextAlignmentCenter;
+    desc.preferredMaxLayoutWidth = 280;
+
+    // 版权信息
+    NSTextField *copyright = [NSTextField labelWithString:@"版权所有 © 2026 iGruel.com"];
+    copyright.textColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.70];
+    copyright.font = [NSFont systemFontOfSize:12];
+    copyright.translatesAutoresizingMaskIntoConstraints = NO;
+
+    // 支持邮箱（可点击复制或发送邮件）
+    NSTextField *email = [NSTextField labelWithString:@"技术支持邮箱：ibmos_2@163.com"];
+    email.textColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.90];
+    email.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSButton *copyEmailButton = [NSButton buttonWithTitle:@"复制" target:self action:@selector(copySupportEmailAction:)];
+    copyEmailButton.bezelStyle = NSBezelStyleRounded;
+    copyEmailButton.image = [NSImage imageWithSystemSymbolName:@"doc.on.doc" accessibilityDescription:@"复制"];
+    copyEmailButton.imagePosition = NSImageLeading;
+    copyEmailButton.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSButton *sendEmailButton = [NSButton buttonWithTitle:@"发送邮件" target:self action:@selector(sendSupportEmailAction:)];
+    sendEmailButton.bezelStyle = NSBezelStyleRounded;
+    sendEmailButton.image = [NSImage imageWithSystemSymbolName:@"envelope" accessibilityDescription:@"发送邮件"];
+    sendEmailButton.imagePosition = NSImageLeading;
+    sendEmailButton.translatesAutoresizingMaskIntoConstraints = NO;
+
+    // 资助本软件（微信扫码）
+    NSTextField *sponsorTitle = [NSTextField labelWithString:@"资助本软件"];
+    sponsorTitle.font = [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold];
+    sponsorTitle.textColor = [NSColor whiteColor];
+    sponsorTitle.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSTextField *sponsorDesc = [NSTextField wrappingLabelWithString:@"本软件免费开放使用。如果你觉得它给你带来便利，欢迎自愿赞助。赞助没有强制回报，仅作为对开发者的支持。\n你的赞助将助力持续维护、修复问题、开发新功能，基础功能不会因为未赞助而受限。"];
+    sponsorDesc.textColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.95];
+    sponsorDesc.font = [NSFont systemFontOfSize:13];
+    sponsorDesc.alignment = NSTextAlignmentCenter;
+    sponsorDesc.maximumNumberOfLines = 0;
+    sponsorDesc.preferredMaxLayoutWidth = 340;
+    sponsorDesc.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSImage *qrImage = [self makeQRCodeImageFromString:@"wxp://f2f0-2JekJo3N4tu0w0wgTfT6mhZWPS6nUPqvEdleDRmLoe_elQPPWMFoZyn0MxfI5eI" size:150];
+
+    NSImageView *qrCodeView = [[NSImageView alloc] init];
+    qrCodeView.image = qrImage;
+    qrCodeView.imageScaling = NSImageScaleProportionallyUpOrDown;
+    qrCodeView.wantsLayer = YES;
+    qrCodeView.layer.backgroundColor = [NSColor whiteColor].CGColor;
+    qrCodeView.layer.cornerRadius = 10;
+    qrCodeView.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSTextField *sponsor = [NSTextField labelWithString:@"请使用微信扫码资助本软件"];
+    sponsor.textColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.90];
+    sponsor.translatesAutoresizingMaskIntoConstraints = NO;
 
     [container addSubview:title];
     [container addSubview:version];
     [container addSubview:desc];
+    [container addSubview:copyright];
+    [container addSubview:email];
+    [container addSubview:copyEmailButton];
+    [container addSubview:sendEmailButton];
+    [container addSubview:sponsorTitle];
+    [container addSubview:sponsorDesc];
+    [container addSubview:qrCodeView];
+    [container addSubview:sponsor];
 
     [NSLayoutConstraint activateConstraints:@[
-        [title.topAnchor constraintEqualToAnchor:container.topAnchor constant:80],
+        [background.topAnchor constraintEqualToAnchor:container.topAnchor],
+        [background.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [background.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [background.bottomAnchor constraintEqualToAnchor:container.bottomAnchor],
+
+        [title.topAnchor constraintEqualToAnchor:container.topAnchor constant:60],
         [title.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
 
         [version.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:8],
@@ -963,8 +1107,60 @@ static NSImage *TVLetterIcon(NSString *name) {
         [desc.topAnchor constraintEqualToAnchor:version.bottomAnchor constant:20],
         [desc.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:40],
         [desc.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-40],
+
+        [copyright.topAnchor constraintEqualToAnchor:desc.bottomAnchor constant:20],
+        [copyright.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+
+        [email.topAnchor constraintEqualToAnchor:copyright.bottomAnchor constant:8],
+        [email.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+
+        [copyEmailButton.topAnchor constraintEqualToAnchor:email.bottomAnchor constant:6],
+        [copyEmailButton.trailingAnchor constraintEqualToAnchor:container.centerXAnchor constant:-4],
+        [sendEmailButton.topAnchor constraintEqualToAnchor:email.bottomAnchor constant:6],
+        [sendEmailButton.leadingAnchor constraintEqualToAnchor:container.centerXAnchor constant:4],
+
+        [sponsorTitle.topAnchor constraintEqualToAnchor:copyEmailButton.bottomAnchor constant:24],
+        [sponsorTitle.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+
+        [sponsorDesc.topAnchor constraintEqualToAnchor:sponsorTitle.bottomAnchor constant:8],
+        [sponsorDesc.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:40],
+        [sponsorDesc.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-40],
+
+        [qrCodeView.topAnchor constraintEqualToAnchor:sponsorDesc.bottomAnchor constant:12],
+        [qrCodeView.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+        [qrCodeView.widthAnchor constraintEqualToConstant:150],
+        [qrCodeView.heightAnchor constraintEqualToConstant:150],
+
+        [sponsor.topAnchor constraintEqualToAnchor:qrCodeView.bottomAnchor constant:8],
+        [sponsor.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
     ]];
     return container;
+}
+
+// 使用 Core Image 生成指定字符串的二维码图片。
+- (NSImage *)makeQRCodeImageFromString:(NSString *)string size:(CGFloat)size {
+    NSData *data = [string dataUsingEncoding:NSUTF8StringEncoding];
+    CIFilter *filter = [CIFilter filterWithName:@"CIQRCodeGenerator"];
+    [filter setValue:data forKey:@"inputMessage"];
+    [filter setValue:@"M" forKey:@"inputCorrectionLevel"];
+    CIImage *outputImage = filter.outputImage;
+    if (!outputImage) {
+        return nil;
+    }
+
+    CGRect extent = outputImage.extent;
+    CGFloat scaleX = size / CGRectGetWidth(extent);
+    CGFloat scaleY = size / CGRectGetHeight(extent);
+    CIImage *scaled = [outputImage imageByApplyingTransform:CGAffineTransformMakeScale(scaleX, scaleY)];
+
+    CIContext *context = [CIContext contextWithOptions:nil];
+    CGImageRef cgImage = [context createCGImage:scaled fromRect:scaled.extent];
+    if (!cgImage) {
+        return nil;
+    }
+    NSImage *image = [[NSImage alloc] initWithCGImage:cgImage size:NSMakeSize(size, size)];
+    CGImageRelease(cgImage);
+    return image;
 }
 
 - (NSCollectionView *)makeCollectionView {
@@ -994,10 +1190,13 @@ static NSImage *TVLetterIcon(NSString *name) {
 }
 
 - (void)showContentViewAtIndex:(NSInteger)index {
-    NSArray<NSView *> *views = @[self.dataSourcesView, self.searchView, self.vodView,
-                                 self.liveView, self.historyView, self.settingsView, self.aboutView];
-    for (NSInteger i = 0; i < (NSInteger)views.count; i++) {
-        views[i].hidden = (i != index);
+    for (NSInteger i = 0; i < (NSInteger)self.contentViews.count; i++) {
+        BOOL active = (i == index);
+        NSView *view = self.contentViews[i];
+        view.hidden = !active;
+        for (NSLayoutConstraint *constraint in self.contentViewPinConstraints[i]) {
+            constraint.active = active;
+        }
     }
 }
 
@@ -1223,6 +1422,14 @@ static NSImage *TVLetterIcon(NSString *name) {
 
 - (void)siteChanged:(NSPopUpButton *)sender {
     self.selectedCategoryId = 0;
+    // 更换数据源后首先清理列表，再加载新数据源内容
+    self.videos = @[];
+    self.categories = @[];
+    self.vodPage = 0;
+    self.vodHasMore = NO;
+    self.vodLoadingMore = NO;
+    [self rebuildCategoryButtons];
+    [self.vodCollectionView reloadData];
     [self loadVODList];
 }
 
@@ -1437,6 +1644,114 @@ static NSImage *TVLetterIcon(NSString *name) {
 - (void)searchAction:(id)sender {
     [self.searchTimer invalidate];
     [self performSearch:nil];
+    [self rememberSearchKeyword:[self.searchField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]];
+}
+
+#pragma mark - 搜索关键词历史
+
+- (void)loadSearchKeywords {
+    self.searchKeywords = [NSMutableArray array];
+    NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:kTVBoxSearchKeywordsKey];
+    if ([saved isKindOfClass:[NSArray class]]) {
+        for (id item in saved) {
+            if ([item isKindOfClass:[NSString class]] && [(NSString *)item length] > 0) {
+                [self.searchKeywords addObject:(NSString *)item];
+            }
+        }
+    }
+}
+
+// 记录一次搜索关键词（去重、最新在前、限制数量并持久化）
+- (void)rememberSearchKeyword:(NSString *)keyword {
+    if (keyword.length == 0) return;
+    [self.searchKeywords removeObject:keyword];
+    [self.searchKeywords insertObject:keyword atIndex:0];
+    while (self.searchKeywords.count > kTVBoxSearchKeywordsLimit) {
+        [self.searchKeywords removeLastObject];
+    }
+    [[NSUserDefaults standardUserDefaults] setObject:[self.searchKeywords copy] forKey:kTVBoxSearchKeywordsKey];
+    [self rebuildSearchKeywordsBar];
+}
+
+// 重新构建关键词历史条
+- (void)rebuildSearchKeywordsBar {
+    for (NSView *subview in [self.searchKeywordsBar.subviews copy]) {
+        [subview removeFromSuperview];
+    }
+
+    BOOL hasKeywords = (self.searchKeywords.count > 0);
+    self.searchKeywordsScroll.hidden = !hasKeywords;
+    self.searchKeywordsHeightConstraint.constant = hasKeywords ? 34 : 0;
+
+    if (!hasKeywords) {
+        self.searchKeywordsBar.frame = NSMakeRect(0, 0, 0, 34);
+        return;
+    }
+
+    const CGFloat barHeight = 34;
+    const CGFloat chipHeight = 24;
+    const CGFloat spacing = 8;
+    const CGFloat deleteWidth = 20;
+
+    CGFloat x = 0;
+
+    // 前缀标签，说明该行内容
+    NSTextField *prefix = [NSTextField labelWithString:@"搜索历史："];
+    prefix.font = [NSFont systemFontOfSize:12];
+    prefix.textColor = [NSColor secondaryLabelColor];
+    [prefix sizeToFit];
+    CGFloat prefixWidth = prefix.frame.size.width;
+    prefix.frame = NSMakeRect(x, (barHeight - prefix.frame.size.height) / 2.0, prefixWidth, prefix.frame.size.height);
+    [self.searchKeywordsBar addSubview:prefix];
+    x += prefixWidth + spacing;
+
+    for (NSString *keyword in self.searchKeywords) {
+        NSButton *chip = [NSButton buttonWithTitle:keyword target:self action:@selector(searchKeywordChipClicked:)];
+        chip.bezelStyle = NSBezelStyleRounded;
+        chip.controlSize = NSControlSizeSmall;
+        chip.font = [NSFont systemFontOfSize:12];
+        chip.toolTip = @"点击重新搜索";
+        chip.image = [NSImage imageWithSystemSymbolName:@"magnifyingglass" accessibilityDescription:@"搜索"];
+        chip.imagePosition = NSImageLeading;
+        [chip sizeToFit];
+        CGFloat chipWidth = MAX(chip.fittingSize.width + 12, 40);
+        chip.frame = NSMakeRect(x, (barHeight - chipHeight) / 2.0, chipWidth, chipHeight);
+        [self.searchKeywordsBar addSubview:chip];
+
+        NSButton *deleteButton = [NSButton buttonWithTitle:keyword target:self action:@selector(searchKeywordDeleteClicked:)];
+        deleteButton.title = keyword;
+        deleteButton.image = [NSImage imageWithSystemSymbolName:@"xmark.circle.fill" accessibilityDescription:@"删除"];
+        deleteButton.imagePosition = NSImageOnly;
+        deleteButton.bezelStyle = NSBezelStyleRegularSquare;
+        deleteButton.bordered = NO;
+        deleteButton.contentTintColor = [NSColor secondaryLabelColor];
+        deleteButton.toolTip = @"删除该关键词";
+        deleteButton.frame = NSMakeRect(x + chipWidth + 2, (barHeight - deleteWidth) / 2.0, deleteWidth, deleteWidth);
+        [self.searchKeywordsBar addSubview:deleteButton];
+
+        x += chipWidth + 2 + deleteWidth + spacing;
+    }
+
+    self.searchKeywordsBar.frame = NSMakeRect(0, 0, x, barHeight);
+    [self.searchKeywordsScroll reflectScrolledClipView:self.searchKeywordsScroll.contentView];
+}
+
+- (void)searchKeywordChipClicked:(id)sender {
+    NSString *keyword = [(NSButton *)sender title];
+    if (keyword.length == 0) return;
+    self.searchField.stringValue = keyword;
+    [self.searchTimer invalidate];
+    [self performSearch:nil];
+    // 点击历史关键词重新搜索，将其移动到历史最前
+    [self rememberSearchKeyword:keyword];
+}
+
+- (void)searchKeywordDeleteClicked:(id)sender {
+    NSString *keyword = [(NSButton *)sender title];
+    if (keyword.length == 0) return;
+    [self.searchKeywords removeObject:keyword];
+    [[NSUserDefaults standardUserDefaults] setObject:[self.searchKeywords copy] forKey:kTVBoxSearchKeywordsKey];
+    [self rebuildSearchKeywordsBar];
 }
 
 - (void)performSearch:(id)sender {
@@ -1447,6 +1762,10 @@ static NSImage *TVLetterIcon(NSString *name) {
         [self setStatus:@""];
         return;
     }
+
+    // 先清除上一次的搜索结果，再进行新的搜索
+    self.searchResults = @[];
+    [self.searchCollectionView reloadData];
 
     self.searchGeneration++;
     NSInteger generation = self.searchGeneration;
@@ -1480,12 +1799,54 @@ static NSImage *TVLetterIcon(NSString *name) {
             }
             remaining--;
             if (remaining == 0 && generation == self.searchGeneration) {
-                self.searchResults = results;
+                // 搜索结果按相似度从高到低排序
+                NSArray<TVVideo *> *sorted = [results sortedArrayUsingComparator:^NSComparisonResult(TVVideo *a, TVVideo *b) {
+                    double sa = [self searchSimilarityScore:keyword video:a];
+                    double sb = [self searchSimilarityScore:keyword video:b];
+                    if (sa > sb) return NSOrderedAscending;
+                    if (sa < sb) return NSOrderedDescending;
+                    return NSOrderedSame;
+                }];
+                self.searchResults = sorted;
                 [self.searchCollectionView reloadData];
                 [self setStatus:@""];
             }
         }];
     }
+}
+
+// 计算视频标题与关键词的相似度（0~1，越高越相似）
+- (double)searchSimilarityScore:(NSString *)keyword video:(TVVideo *)video {
+    double nameScore = [self similarityBetweenKeyword:keyword andTitle:video.name];
+    double enScore = [self similarityBetweenKeyword:keyword andTitle:video.vodEn];
+    return MAX(nameScore, enScore);
+}
+
+- (double)similarityBetweenKeyword:(NSString *)keyword andTitle:(NSString *)title {
+    if (keyword.length == 0 || title.length == 0) return 0;
+
+    NSString *k = [keyword lowercaseString];
+    NSString *t = [title lowercaseString];
+
+    if ([t isEqualToString:k]) return 1.0;
+
+    if ([t hasPrefix:k]) {
+        // 前缀匹配：关键词占标题比例越高得分越高
+        return 0.9 + 0.09 * ((double)k.length / (double)t.length);
+    }
+
+    NSRange range = [t rangeOfString:k];
+    if (range.location != NSNotFound) {
+        // 包含匹配：关键词出现位置越靠前得分越高
+        double positionFactor = 1.0 - ((double)range.location / (double)t.length);
+        return 0.6 + 0.3 * positionFactor;
+    }
+
+    // 其余情况按编辑距离估算相似度
+    NSUInteger maxLen = MAX(k.length, t.length);
+    if (maxLen == 0) return 0;
+    NSUInteger distance = TVLevenshteinDistance(k, t);
+    return MAX(0.0, 1.0 - ((double)distance / (double)maxLen)) * 0.5;
 }
 
 - (NSArray<TVVideo *> *)videosFromList:(id)list {
@@ -1592,11 +1953,324 @@ static NSImage *TVLetterIcon(NSString *name) {
         }
         [self setStatus:@""];
         TVVideo *detail = [TVVideo videoFromDictionary:(NSDictionary *)list[0]];
-        [self presentPlayerWithTitle:detail.name block:^(PlayerViewController *player) {
-            [player playVideo:detail];
-        }];
-        self.currentHistoryItem = [self historyItemForVideo:detail site:site];
+        [self showDetailModalForVideo:detail site:site];
     }];
+}
+
+// 用模态窗口显示该视频的介绍信息和可播放的视频列表，并提供播放按钮
+- (void)showDetailModalForVideo:(TVVideo *)detail site:(TVSite *)site {
+    self.detailModalVideo = detail;
+    self.detailModalSite = site;
+
+    NSArray<TVPlaySource *> *sources = [detail playSources];
+
+    NSWindow *modal = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 700, 600)
+                                                   styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
+                                                     backing:NSBackingStoreBuffered
+                                                       defer:NO];
+    modal.title = detail.name ?: @"视频详情";
+    modal.releasedWhenClosed = NO;
+    self.detailModalWindow = modal;
+
+    NSView *root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 700, 600)];
+    modal.contentView = root;
+
+    // 海报
+    NSImageView *posterView = [[NSImageView alloc] init];
+    posterView.translatesAutoresizingMaskIntoConstraints = NO;
+    posterView.imageScaling = NSImageScaleProportionallyUpOrDown;
+    posterView.wantsLayer = YES;
+    posterView.layer.cornerRadius = 8;
+    posterView.layer.masksToBounds = YES;
+    posterView.layer.backgroundColor = [NSColor colorWithWhite:0.86 alpha:1.0].CGColor;
+    [root addSubview:posterView];
+    [self loadPosterImage:detail.vodPic into:posterView];
+
+    // 标题
+    NSTextField *titleLabel = [NSTextField labelWithString:detail.name ?: @""];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    titleLabel.font = [NSFont boldSystemFontOfSize:20];
+    titleLabel.textColor = [NSColor labelColor];
+    titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [root addSubview:titleLabel];
+
+    // 元信息（类型 · 年代 · 备注 / 导演 / 主演）
+    NSTextField *metaLabel = [NSTextField wrappingLabelWithString:[self modalMetaTextForVideo:detail]];
+    metaLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    metaLabel.font = [NSFont systemFontOfSize:12];
+    metaLabel.textColor = [NSColor secondaryLabelColor];
+    metaLabel.maximumNumberOfLines = 3;
+    [root addSubview:metaLabel];
+
+    // 分隔线
+    NSView *divider = [[NSView alloc] init];
+    divider.translatesAutoresizingMaskIntoConstraints = NO;
+    divider.wantsLayer = YES;
+    divider.layer.backgroundColor = [NSColor separatorColor].CGColor;
+    [root addSubview:divider];
+
+    // 简介区标题
+    NSTextField *introLabel = [NSTextField labelWithString:@"简介"];
+    introLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    introLabel.font = [NSFont boldSystemFontOfSize:13];
+    introLabel.textColor = [NSColor labelColor];
+    [root addSubview:introLabel];
+
+    // 简介内容（可滚动，HTML 解析）
+    NSTextView *infoView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 0, 0)];
+    infoView.editable = NO;
+    infoView.drawsBackground = NO;
+    infoView.minSize = NSMakeSize(0, 0);
+    infoView.maxSize = NSMakeSize(FLT_MAX, FLT_MAX);
+    infoView.verticallyResizable = YES;
+    infoView.horizontallyResizable = NO;
+    infoView.autoresizingMask = NSViewWidthSizable;
+    infoView.textContainer.containerSize = NSMakeSize(FLT_MAX, FLT_MAX);
+    infoView.textContainer.widthTracksTextView = YES;
+    [infoView.textStorage setAttributedString:[self modalDetailTextForVideo:detail]];
+
+    NSScrollView *infoScroll = [[NSScrollView alloc] init];
+    infoScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    infoScroll.hasVerticalScroller = YES;
+    infoScroll.borderType = NSNoBorder;
+    infoScroll.drawsBackground = NO;
+    infoScroll.documentView = infoView;
+    [root addSubview:infoScroll];
+
+    // 可播放列表：线路 + 集数
+    NSTextField *lineLabel = [NSTextField labelWithString:@"线路"];
+    lineLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    lineLabel.font = [NSFont systemFontOfSize:12];
+    lineLabel.textColor = [NSColor secondaryLabelColor];
+    [root addSubview:lineLabel];
+
+    NSPopUpButton *linePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    linePopup.translatesAutoresizingMaskIntoConstraints = NO;
+    for (TVPlaySource *source in sources) {
+        [linePopup addItemWithTitle:source.name];
+    }
+    linePopup.target = self;
+    linePopup.action = @selector(detailModalLineChanged:);
+    [root addSubview:linePopup];
+    self.detailModalLinePopup = linePopup;
+
+    NSTextField *episodeLabel = [NSTextField labelWithString:@"集数"];
+    episodeLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    episodeLabel.font = [NSFont systemFontOfSize:12];
+    episodeLabel.textColor = [NSColor secondaryLabelColor];
+    [root addSubview:episodeLabel];
+
+    NSPopUpButton *episodePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    episodePopup.translatesAutoresizingMaskIntoConstraints = NO;
+    [root addSubview:episodePopup];
+    self.detailModalEpisodePopup = episodePopup;
+
+    NSButton *cancelButton = [NSButton buttonWithTitle:@"取消" target:self action:@selector(detailModalCancelAction:)];
+    cancelButton.translatesAutoresizingMaskIntoConstraints = NO;
+    cancelButton.bezelStyle = NSBezelStyleRounded;
+    cancelButton.keyEquivalent = @"\e";
+    cancelButton.image = [NSImage imageWithSystemSymbolName:@"xmark" accessibilityDescription:@"取消"];
+    cancelButton.imagePosition = NSImageLeading;
+    [root addSubview:cancelButton];
+
+    NSButton *playButton = [NSButton buttonWithTitle:@"播放" target:self action:@selector(detailModalPlayAction:)];
+    playButton.translatesAutoresizingMaskIntoConstraints = NO;
+    playButton.bezelStyle = NSBezelStyleRounded;
+    playButton.keyEquivalent = @"\r";
+    playButton.image = [NSImage imageWithSystemSymbolName:@"play.fill" accessibilityDescription:@"播放"];
+    playButton.imagePosition = NSImageLeading;
+    playButton.enabled = (sources.count > 0);
+    [root addSubview:playButton];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [posterView.topAnchor constraintEqualToAnchor:root.topAnchor constant:20],
+        [posterView.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:20],
+        [posterView.widthAnchor constraintEqualToConstant:170],
+        [posterView.heightAnchor constraintEqualToConstant:238],
+
+        [titleLabel.topAnchor constraintEqualToAnchor:root.topAnchor constant:20],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:posterView.trailingAnchor constant:20],
+        [titleLabel.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-20],
+
+        [metaLabel.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:6],
+        [metaLabel.leadingAnchor constraintEqualToAnchor:titleLabel.leadingAnchor],
+        [metaLabel.trailingAnchor constraintEqualToAnchor:titleLabel.trailingAnchor],
+
+        [divider.topAnchor constraintEqualToAnchor:metaLabel.bottomAnchor constant:14],
+        [divider.leadingAnchor constraintEqualToAnchor:titleLabel.leadingAnchor],
+        [divider.trailingAnchor constraintEqualToAnchor:titleLabel.trailingAnchor],
+        [divider.heightAnchor constraintEqualToConstant:1],
+
+        [introLabel.topAnchor constraintEqualToAnchor:divider.bottomAnchor constant:12],
+        [introLabel.leadingAnchor constraintEqualToAnchor:titleLabel.leadingAnchor],
+
+        [infoScroll.topAnchor constraintEqualToAnchor:introLabel.bottomAnchor constant:6],
+        [infoScroll.leadingAnchor constraintEqualToAnchor:titleLabel.leadingAnchor],
+        [infoScroll.trailingAnchor constraintEqualToAnchor:titleLabel.trailingAnchor],
+        [infoScroll.bottomAnchor constraintEqualToAnchor:linePopup.topAnchor constant:-16],
+
+        [lineLabel.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:20],
+        [lineLabel.centerYAnchor constraintEqualToAnchor:linePopup.centerYAnchor],
+        [linePopup.leadingAnchor constraintEqualToAnchor:lineLabel.trailingAnchor constant:8],
+        [linePopup.widthAnchor constraintEqualToConstant:150],
+        [linePopup.bottomAnchor constraintEqualToAnchor:root.bottomAnchor constant:-20],
+
+        [episodeLabel.leadingAnchor constraintEqualToAnchor:linePopup.trailingAnchor constant:16],
+        [episodeLabel.centerYAnchor constraintEqualToAnchor:episodePopup.centerYAnchor],
+        [episodePopup.leadingAnchor constraintEqualToAnchor:episodeLabel.trailingAnchor constant:8],
+        [episodePopup.widthAnchor constraintEqualToConstant:150],
+        [episodePopup.bottomAnchor constraintEqualToAnchor:linePopup.bottomAnchor],
+
+        [cancelButton.trailingAnchor constraintEqualToAnchor:playButton.leadingAnchor constant:-10],
+        [cancelButton.centerYAnchor constraintEqualToAnchor:playButton.centerYAnchor],
+        [cancelButton.widthAnchor constraintEqualToConstant:72],
+
+        [playButton.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-20],
+        [playButton.bottomAnchor constraintEqualToAnchor:root.bottomAnchor constant:-20],
+        [playButton.widthAnchor constraintEqualToConstant:120],
+    ]];
+
+    [self detailModalLineChanged:linePopup];
+
+    [self.view.window beginSheet:modal completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode == NSModalResponseOK) {
+            [self beginPlaybackFromModal];
+        }
+        self.detailModalWindow = nil;
+    }];
+}
+
+- (void)detailModalLineChanged:(NSPopUpButton *)sender {
+    NSArray<TVPlaySource *> *sources = [self.detailModalVideo playSources];
+    NSInteger index = sender.indexOfSelectedItem;
+    [self.detailModalEpisodePopup removeAllItems];
+    if (index >= 0 && index < (NSInteger)sources.count) {
+        for (TVEpisode *episode in sources[index].episodes) {
+            [self.detailModalEpisodePopup addItemWithTitle:episode.name];
+        }
+    }
+    if (self.detailModalEpisodePopup.numberOfItems > 0) {
+        [self.detailModalEpisodePopup selectItemAtIndex:0];
+    }
+}
+
+- (void)detailModalPlayAction:(id)sender {
+    NSWindow *sheet = self.detailModalWindow;
+    if (sheet.sheetParent) {
+        [sheet.sheetParent endSheet:sheet returnCode:NSModalResponseOK];
+    }
+}
+
+- (void)detailModalCancelAction:(id)sender {
+    NSWindow *sheet = self.detailModalWindow;
+    if (sheet.sheetParent) {
+        [sheet.sheetParent endSheet:sheet returnCode:NSModalResponseCancel];
+    }
+}
+
+// 点击播放按钮后关闭模态窗口并播放该视频
+- (void)beginPlaybackFromModal {
+    TVVideo *detail = self.detailModalVideo;
+    TVSite *site = self.detailModalSite;
+    if (!detail || !site) return;
+
+    NSArray<TVPlaySource *> *sources = [detail playSources];
+    NSInteger sourceIndex = self.detailModalLinePopup.indexOfSelectedItem;
+    NSInteger episodeIndex = self.detailModalEpisodePopup.indexOfSelectedItem;
+    if (sourceIndex < 0 || sourceIndex >= (NSInteger)sources.count) sourceIndex = 0;
+    NSArray<TVEpisode *> *episodes = sources.count > 0 ? sources[sourceIndex].episodes : @[];
+    if (episodeIndex < 0 || episodeIndex >= (NSInteger)episodes.count) episodeIndex = 0;
+
+    [self presentPlayerWithTitle:detail.name block:^(PlayerViewController *player) {
+        [player resumeVideo:detail sourceIndex:sourceIndex episodeIndex:episodeIndex resumeTime:0];
+    }];
+    self.currentHistoryItem = [self historyItemForVideo:detail site:site];
+}
+
+// 构建模态窗口标题下方的元信息文本
+- (NSString *)modalMetaTextForVideo:(TVVideo *)video {
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    NSMutableArray<NSString *> *tags = [NSMutableArray array];
+    if (video.typeName.length > 0) [tags addObject:video.typeName];
+    if (video.vodTime.length > 0) [tags addObject:video.vodTime];
+    if (video.remarks.length > 0) [tags addObject:video.remarks];
+    if (tags.count > 0) [lines addObject:[tags componentsJoinedByString:@"  ·  "]];
+    if (video.vodDirector.length > 0) [lines addObject:[NSString stringWithFormat:@"导演：%@", video.vodDirector]];
+    if (video.vodActor.length > 0) [lines addObject:[NSString stringWithFormat:@"主演：%@", video.vodActor]];
+    return [lines componentsJoinedByString:@"\n"];
+}
+
+// 构建模态窗口中的简介内容（HTML 解析）
+- (NSAttributedString *)modalDetailTextForVideo:(TVVideo *)video {
+    if (video.vodContent.length > 0) {
+        NSAttributedString *html = [self modalHTMLAttributedString:video.vodContent];
+        if (html.length > 0) {
+            return html;
+        }
+        return [[NSAttributedString alloc] initWithString:video.vodContent attributes:@{
+            NSFontAttributeName: [NSFont systemFontOfSize:13],
+            NSForegroundColorAttributeName: [NSColor labelColor],
+        }];
+    }
+    return [[NSAttributedString alloc] initWithString:@"暂无简介" attributes:@{
+        NSFontAttributeName: [NSFont systemFontOfSize:13],
+        NSForegroundColorAttributeName: [NSColor tertiaryLabelColor],
+    }];
+}
+
+// 异步加载海报图
+- (void)loadPosterImage:(NSString *)urlString into:(NSImageView *)imageView {
+    imageView.image = [VODCollectionItem defaultPosterImage];
+    if (urlString.length == 0) return;
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (!url) return;
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url
+        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+        NSImage *image = nil;
+        if (!error && data) {
+            image = [[NSImage alloc] initWithData:data];
+        }
+        NSImage *finalImage = image ?: [VODCollectionItem defaultPosterImage];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            imageView.image = finalImage;
+        });
+    }];
+    [task resume];
+}
+
+// 以 HTML 格式解释简介内容，支持 <br>、<p>、<b>、<i> 等标签
+- (NSAttributedString *)modalHTMLAttributedString:(NSString *)html {
+    if (html.length == 0) return nil;
+    NSString *wrapped = [NSString stringWithFormat:@"<span style=\"font-size:13px;\">%@</span>", html];
+    NSData *data = [wrapped dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data) return nil;
+
+    NSError *error = nil;
+    NSAttributedString *attr = [[NSAttributedString alloc] initWithData:data
+                                                                options:@{
+        NSDocumentTypeDocumentAttribute: NSHTMLTextDocumentType,
+        NSCharacterEncodingDocumentAttribute: @(NSUTF8StringEncoding),
+    } documentAttributes:nil error:&error];
+    if (error || attr.length == 0) return nil;
+
+    NSMutableAttributedString *normalized = [attr mutableCopy];
+    [attr enumerateAttributesInRange:NSMakeRange(0, attr.length)
+                             options:0
+                          usingBlock:^(NSDictionary<NSAttributedStringKey, id> *attributes, NSRange range, BOOL *stop) {
+        NSFont *font = attributes[NSFontAttributeName];
+        NSFontManager *fontManager = [NSFontManager sharedFontManager];
+        NSFont *newFont = [NSFont systemFontOfSize:13];
+        if (font && ([fontManager traitsOfFont:font] & NSBoldFontMask)) {
+            newFont = [fontManager convertFont:newFont toHaveTrait:NSBoldFontMask];
+        }
+        if (font && ([fontManager traitsOfFont:font] & NSItalicFontMask)) {
+            newFont = [fontManager convertFont:newFont toHaveTrait:NSItalicFontMask];
+        }
+        [normalized addAttribute:NSFontAttributeName value:newFont range:range];
+        [normalized addAttribute:NSForegroundColorAttributeName value:[NSColor labelColor] range:range];
+    }];
+    return normalized;
 }
 
 #pragma mark - 直播逻辑
@@ -1876,6 +2550,18 @@ static NSImage *TVLetterIcon(NSString *name) {
     return result;
 }
 
+- (void)sourceRowDoubleClicked:(id)sender {
+    NSInteger row = self.sourcesTable.clickedRow;
+    if (row < 0 || row >= (NSInteger)self.sourceRows.count) return;
+    NSDictionary *sourceRow = self.sourceRows[row];
+    NSString *url = sourceRow[@"url"];
+    if (url.length == 0) return;
+    NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+    [pasteboard clearContents];
+    [pasteboard setString:url forType:NSPasteboardTypeString];
+    [self setStatus:[NSString stringWithFormat:@"已复制数据源地址：%@", url]];
+}
+
 - (void)liveRowDoubleClicked:(id)sender {
     NSInteger row = self.liveTable.clickedRow;
     if (row < 0 || row >= (NSInteger)self.displayedLiveChannels.count) return;
@@ -1946,63 +2632,113 @@ static NSImage *TVLetterIcon(NSString *name) {
 }
 
 - (void)loadConfigURLRows {
-    [self.configURLRows removeAllObjects];
-    [self.configURLRows addObjectsFromArray:[self.config configURLs]];
-    [self.liveConfigURLRows removeAllObjects];
-    [self.liveConfigURLRows addObjectsFromArray:[self.config liveConfigURLs]];
-    [self.settingsTable reloadData];
-    [self.liveSettingsTable reloadData];
-}
-
-- (void)addConfigURLAction:(id)sender {
-    [self.configURLRows addObject:@""];
-    [self.settingsTable reloadData];
-    NSInteger row = (NSInteger)self.configURLRows.count - 1;
-    [self.settingsTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
-    [self.settingsTable scrollRowToVisible:row];
-}
-
-- (void)deleteConfigURLAction:(id)sender {
-    NSInteger row = self.settingsTable.selectedRow;
-    if (row < 0 || row >= (NSInteger)self.configURLRows.count) return;
-    [self.configURLRows removeObjectAtIndex:(NSUInteger)row];
-    [self.settingsTable reloadData];
-}
-
-- (void)addLiveConfigURLAction:(id)sender {
-    [self.liveConfigURLRows addObject:@""];
-    [self.liveSettingsTable reloadData];
-    NSInteger row = (NSInteger)self.liveConfigURLRows.count - 1;
-    [self.liveSettingsTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
-    [self.liveSettingsTable scrollRowToVisible:row];
-}
-
-- (void)deleteLiveConfigURLAction:(id)sender {
-    NSInteger row = self.liveSettingsTable.selectedRow;
-    if (row < 0 || row >= (NSInteger)self.liveConfigURLRows.count) return;
-    [self.liveConfigURLRows removeObjectAtIndex:(NSUInteger)row];
-    [self.liveSettingsTable reloadData];
-}
-
-- (void)clearLiveConfigURLAction:(id)sender {
-    [self.liveConfigURLRows removeAllObjects];
-    [self.liveSettingsTable reloadData];
-}
-
-- (void)resetConfigURLAction:(id)sender {
-    [self.config resetConfigURLs];
-    [self.config resetLiveConfigURLs];
-    [self loadConfigURLRows];
-    [self reloadConfig];
+    NSArray<NSString *> *vodURLs = [self.config configURLs];
+    self.vodConfigURLField.stringValue = vodURLs.count > 0 ? vodURLs.firstObject : @"";
+    NSArray<NSString *> *liveURLs = [self.config liveConfigURLs];
+    self.liveConfigURLField.stringValue = liveURLs.count > 0 ? liveURLs.firstObject : @"";
 }
 
 - (void)saveConfigURLAction:(id)sender {
-    // 结束当前编辑，确保已输入内容提交到数据模型
+    // 结束当前编辑，确保已输入内容提交
     [self.view.window makeFirstResponder:nil];
-    [self.config saveConfigURLs:self.configURLRows];
-    [self.config saveLiveConfigURLs:self.liveConfigURLRows];
-    [self loadConfigURLRows];
-    [self reloadConfig];
+
+    NSString *vodURL = [self.vodConfigURLField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *liveURL = [self.liveConfigURLField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+    // 未填写点播数据源时，仅保存直播数据源
+    if (vodURL.length == 0) {
+        [self.config saveConfigURLs:@[]];
+        [self.config saveLiveConfigURLs:(liveURL.length > 0 ? @[liveURL] : @[])];
+        [self loadConfigURLRows];
+        [self reloadConfig];
+        return;
+    }
+
+    // 点播数据源必须经过可访问、可解析、TVBox 格式验证后才能保存
+    [self setStatus:@"正在验证点播数据源…"];
+    [self.config validateVODConfigURL:vodURL completion:^(NSArray<TVLiveSource *> * _Nullable detectedLives, NSError * _Nullable error) {
+        if (error) {
+            [self setStatus:@""];
+            [self showErrorAlertWithMessage:error.localizedDescription];
+            return;
+        }
+        [self setStatus:@""];
+        [self.config saveConfigURLs:@[vodURL]];
+
+        // 该配置包含直播数据源时，提供列表供用户选择是否保存
+        if (detectedLives.count > 0) {
+            [self presentLiveSourcePicker:detectedLives completion:^(NSString * _Nullable chosenURL) {
+                NSString *finalLive = chosenURL.length > 0 ? chosenURL : liveURL;
+                [self.config saveLiveConfigURLs:(finalLive.length > 0 ? @[finalLive] : @[])];
+                [self loadConfigURLRows];
+                [self reloadConfig];
+            }];
+        } else {
+            // 不包含直播数据：提示用户，并不从该地址保存直播数据源；仅保存用户手动填写的专属直播数据源
+            [self showInfoAlertWithMessage:@"该点播数据源地址不包含直播数据，未从该地址保存直播数据源。"];
+            [self.config saveLiveConfigURLs:(liveURL.length > 0 ? @[liveURL] : @[])];
+            [self loadConfigURLRows];
+            [self reloadConfig];
+        }
+    }];
+}
+
+- (void)showErrorAlertWithMessage:(NSString *)message {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.alertStyle = NSAlertStyleWarning;
+    alert.messageText = @"保存失败";
+    alert.informativeText = message ?: @"";
+    [alert addButtonWithTitle:@"确定"];
+    if (self.view.window) {
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+    } else {
+        [alert runModal];
+    }
+}
+
+- (void)showInfoAlertWithMessage:(NSString *)message {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.alertStyle = NSAlertStyleInformational;
+    alert.messageText = @"提示";
+    alert.informativeText = message ?: @"";
+    [alert addButtonWithTitle:@"确定"];
+    if (self.view.window) {
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+    } else {
+        [alert runModal];
+    }
+}
+
+// 该配置包含直播数据源时，弹出列表供用户选择是否保存其中一个
+- (void)presentLiveSourcePicker:(NSArray<TVLiveSource *> *)lives completion:(void (^)(NSString * _Nullable chosenURL))completion {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"该配置包含直播数据源";
+    alert.informativeText = @"请选择要保存到直播数据源的地址（选择「不选择」则忽略）：";
+    [alert addButtonWithTitle:@"保存"];
+    [alert addButtonWithTitle:@"不选择"];
+
+    NSPopUpButton *popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 440, 26)];
+    popup.pullsDown = NO;
+    for (TVLiveSource *source in lives) {
+        NSString *name = source.name.length > 0 ? source.name : @"未命名直播源";
+        [popup addItemWithTitle:[NSString stringWithFormat:@"%@（%@）", name, (source.url ?: @"")]];
+        [popup.lastItem setRepresentedObject:source.url];
+    }
+    alert.accessoryView = popup;
+
+    void (^handleResponse)(NSModalResponse) = ^(NSModalResponse response) {
+        NSString *chosen = nil;
+        if (response == NSAlertFirstButtonReturn) {
+            chosen = (NSString *)popup.selectedItem.representedObject;
+        }
+        if (completion) completion(chosen);
+    };
+
+    if (self.view.window) {
+        [alert beginSheetModalForWindow:self.view.window completionHandler:handleResponse];
+    } else {
+        handleResponse([alert runModal]);
+    }
 }
 
 #pragma mark - 历史记录
@@ -2237,8 +2973,6 @@ static NSImage *TVLetterIcon(NSString *name) {
     if (tableView == self.sidebar) return (NSInteger)self.sidebarItems.count;
     if (tableView == self.liveTable) return (NSInteger)self.displayedLiveChannels.count;
     if (tableView == self.sourcesTable) return (NSInteger)self.sourceRows.count;
-    if (tableView == self.settingsTable) return (NSInteger)self.configURLRows.count;
-    if (tableView == self.liveSettingsTable) return (NSInteger)self.liveConfigURLRows.count;
     if (tableView == self.historyTable) return (NSInteger)self.historyItems.count;
     return 0;
 }
@@ -2310,32 +3044,6 @@ static NSImage *TVLetterIcon(NSString *name) {
                 cell.textField.stringValue = sourceRow[tableColumn.identifier] ?: @"";
                 cell.textField.textColor = [NSColor labelColor];
             }
-        }
-        return cell;
-    }
-
-    if (tableView == self.settingsTable || tableView == self.liveSettingsTable) {
-        NSString *identifier = (tableView == self.settingsTable) ? @"SettingsCell" : @"LiveSettingsCell";
-        NSTableCellView *cell = [tableView makeViewWithIdentifier:identifier owner:self];
-        if (!cell) {
-            cell = [[NSTableCellView alloc] init];
-            cell.identifier = identifier;
-            NSTextField *textField = [NSTextField textFieldWithString:@""];
-            textField.translatesAutoresizingMaskIntoConstraints = NO;
-            textField.font = [NSFont systemFontOfSize:13];
-            textField.editable = YES;
-            textField.delegate = self;
-            [cell addSubview:textField];
-            cell.textField = textField;
-            [NSLayoutConstraint activateConstraints:@[
-                [textField.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:4],
-                [textField.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-4],
-                [textField.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
-            ]];
-        }
-        NSArray<NSString *> *rows = (tableView == self.settingsTable) ? self.configURLRows : self.liveConfigURLRows;
-        if (row < (NSInteger)rows.count) {
-            cell.textField.stringValue = rows[row];
         }
         return cell;
     }
@@ -2462,23 +3170,6 @@ static NSImage *TVLetterIcon(NSString *name) {
     }
 }
 
-#pragma mark - NSControlTextEditingDelegate
-
-- (void)controlTextDidEndEditing:(NSNotification *)notification {
-    NSTextField *textField = notification.object;
-
-    NSInteger row = [self.settingsTable rowForView:textField];
-    if (row >= 0 && row < (NSInteger)self.configURLRows.count) {
-        self.configURLRows[(NSUInteger)row] = textField.stringValue ?: @"";
-        return;
-    }
-
-    row = [self.liveSettingsTable rowForView:textField];
-    if (row >= 0 && row < (NSInteger)self.liveConfigURLRows.count) {
-        self.liveConfigURLRows[(NSUInteger)row] = textField.stringValue ?: @"";
-    }
-}
-
 #pragma mark - NSCollectionViewDataSource
 
 - (NSInteger)collectionView:(NSCollectionView *)collectionView numberOfItemsInSection:(NSInteger)section {
@@ -2522,6 +3213,22 @@ static NSImage *TVLetterIcon(NSString *name) {
 
 - (void)setStatus:(NSString *)text {
     self.statusLabel.stringValue = text ?: @"";
+}
+
+#pragma mark - 关于（邮箱操作）
+
+- (void)copySupportEmailAction:(id)sender {
+    NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+    [pasteboard clearContents];
+    [pasteboard setString:@"ibmos_2@163.com" forType:NSPasteboardTypeString];
+    [self setStatus:@"邮箱地址 ibmos_2@163.com 已复制到剪贴板"];
+}
+
+- (void)sendSupportEmailAction:(id)sender {
+    NSURL *url = [NSURL URLWithString:@"mailto:ibmos_2@163.com"];
+    if (url) {
+        [[NSWorkspace sharedWorkspace] openURL:url];
+    }
 }
 
 @end

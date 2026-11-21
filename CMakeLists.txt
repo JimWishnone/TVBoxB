@@ -37,6 +37,8 @@ target_link_libraries(TVBoxB
     "-framework AVFoundation"
     "-framework AVKit"
     "-framework CoreMedia"
+    "-framework QuartzCore"
+    "-framework CoreImage"
 )
 
 set_target_properties(TVBoxB PROPERTIES

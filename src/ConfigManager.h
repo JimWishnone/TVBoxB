@@ -14,14 +14,19 @@ NS_ASSUME_NONNULL_BEGIN
 // 拉取并解析配置（兼容 official.json 单仓与 tvbox.json 多仓两种格式），完成回调始终在主线程执行
 - (void)loadConfigWithCompletion:(void (^)(NSError * _Nullable error))completion;
 
-// 当前生效的数据源配置地址列表（优先使用用户设置，未设置时使用内置镜像）
+// 当前生效的数据源配置地址列表（仅来自用户设置）
 - (NSArray<NSString *> *)configURLs;
 
 // 保存用户自定义的数据源配置地址列表
 - (void)saveConfigURLs:(NSArray<NSString *> *)urls;
 
-// 清除用户自定义配置，恢复内置默认镜像地址
+// 清除用户自定义配置
 - (void)resetConfigURLs;
+
+// 验证点播配置 URL：可访问、可解析、且是 TVBox 支持的配置格式；
+// 成功时返回该配置中包含的直播源数组（可能为空数组），失败时返回 error。
+- (void)validateVODConfigURL:(NSString *)urlString
+                   completion:(void (^)(NSArray<TVLiveSource *> * _Nullable liveSources, NSError * _Nullable error))completion;
 
 // 直播视频源（专属直播的数据源，选填）地址列表，未设置时返回空数组
 - (NSArray<NSString *> *)liveConfigURLs;

@@ -1,17 +1,21 @@
 #import "PlayerViewController.h"
 #import <AVFoundation/AVFoundation.h>
 #import <AVKit/AVKit.h>
+#import <QuartzCore/QuartzCore.h>
 
 static void *PlayerItemStatusContext = &PlayerItemStatusContext;
 
 @interface PlayerViewController ()
 
 @property (nonatomic, strong) AVPlayerView *playerView;
+@property (nonatomic, strong) NSButton *playPauseButton;
 @property (nonatomic, strong) NSStackView *controlBar;
+@property (nonatomic, strong) NSVisualEffectView *controlBarContainer;
+@property (nonatomic, strong) NSView *topTitleOverlay;
+@property (nonatomic, strong) CAGradientLayer *topScrimLayer;
 @property (nonatomic, strong) NSTextField *titleLabel;
 @property (nonatomic, strong) NSPopUpButton *sourcePopup;
 @property (nonatomic, strong) NSPopUpButton *episodePopup;
-@property (nonatomic, strong) NSTextField *detailLabel;
 @property (nonatomic, strong) NSTextField *hintLabel;
 @property (nonatomic, strong) NSButton *channelPrevButton;
 @property (nonatomic, strong) NSButton *channelNextButton;
@@ -21,15 +25,14 @@ static void *PlayerItemStatusContext = &PlayerItemStatusContext;
 @property (nonatomic, strong) NSButton *fullscreenButton;
 @property (nonatomic, strong) NSButton *returnButton;
 @property (nonatomic, strong) NSButton *exitButton;
+@property (nonatomic, strong) NSView *restoreOverlay;
 
 @property (nonatomic, assign) BOOL immersive;
-@property (nonatomic, assign) BOOL savedDetailHidden;
 @property (nonatomic, assign) BOOL savedControlBarHidden;
+@property (nonatomic, assign) BOOL savedTopTitleOverlayHidden;
 @property (nonatomic, assign) BOOL fullscreenActive;
 @property (nonatomic, assign) BOOL windowImmersive;
 @property (nonatomic, weak) NSWindow *observedWindow;
-@property (nonatomic, strong) NSArray<NSLayoutConstraint *> *normalLayoutConstraints;
-@property (nonatomic, strong) NSLayoutConstraint *immersiveBottomConstraint;
 
 @property (nonatomic, strong) TVVideo *video;
 @property (nonatomic, strong) NSArray<TVPlaySource *> *sources;
@@ -61,96 +64,149 @@ static void *PlayerItemStatusContext = &PlayerItemStatusContext;
     self.playerView.controlsStyle = AVPlayerViewControlsStyleFloating;
     [self.view addSubview:self.playerView];
 
+    // 顶部标题覆盖层：当前视频信息覆盖在视频组件上显示，带渐变蒙版保证在画面上清晰可读
     self.titleLabel = [NSTextField labelWithString:@""];
-    self.titleLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
+    self.titleLabel.font = [NSFont systemFontOfSize:16 weight:NSFontWeightSemibold];
     self.titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    self.titleLabel.textColor = [NSColor whiteColor];
+    self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.topTitleOverlay = [[NSView alloc] init];
+    self.topTitleOverlay.translatesAutoresizingMaskIntoConstraints = NO;
+    self.topTitleOverlay.wantsLayer = YES;
+    CAGradientLayer *scrim = [CAGradientLayer layer];
+    scrim.colors = @[(id)[NSColor colorWithCalibratedWhite:0.0 alpha:0.60].CGColor,
+                     (id)[NSColor colorWithCalibratedWhite:0.0 alpha:0.0].CGColor];
+    scrim.locations = @[@0.0, @1.0];
+    scrim.startPoint = CGPointMake(0.5, 0.0);
+    scrim.endPoint = CGPointMake(0.5, 1.0);
+    self.topScrimLayer = scrim;
+    [self.topTitleOverlay.layer addSublayer:scrim];
+    [self.topTitleOverlay addSubview:self.titleLabel];
+    [self.view addSubview:self.topTitleOverlay];
 
     self.sourcePopup = [[NSPopUpButton alloc] init];
+    self.sourcePopup.font = [NSFont systemFontOfSize:12];
     [self.sourcePopup setTarget:self];
     [self.sourcePopup setAction:@selector(sourceChanged:)];
 
     self.episodePopup = [[NSPopUpButton alloc] init];
+    self.episodePopup.font = [NSFont systemFontOfSize:12];
     [self.episodePopup setTarget:self];
     [self.episodePopup setAction:@selector(episodeChanged:)];
 
-    self.detailLabel = [NSTextField wrappingLabelWithString:@""];
-    self.detailLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.detailLabel.font = [NSFont systemFontOfSize:12];
-    self.detailLabel.textColor = [NSColor secondaryLabelColor];
-    self.detailLabel.maximumNumberOfLines = 0;
-    self.detailLabel.lineBreakMode = NSLineBreakByWordWrapping;
-    [self.view addSubview:self.detailLabel];
-
     self.hintLabel = [NSTextField labelWithString:@"↑↓ 切换频道　←→ 切换线路"];
     self.hintLabel.font = [NSFont systemFontOfSize:12];
-    self.hintLabel.textColor = [NSColor secondaryLabelColor];
+    self.hintLabel.textColor = [NSColor colorWithCalibratedWhite:0.85 alpha:1.0];
     self.hintLabel.hidden = YES;
 
     self.channelPrevButton = [self iconButtonWithSymbol:@"chevron.up" tooltip:@"上一个频道" action:@selector(channelPrevAction:)];
     self.channelNextButton = [self iconButtonWithSymbol:@"chevron.down" tooltip:@"下一个频道" action:@selector(channelNextAction:)];
     self.linePrevButton = [self iconButtonWithSymbol:@"chevron.left" tooltip:@"上一个线路" action:@selector(linePrevAction:)];
     self.lineNextButton = [self iconButtonWithSymbol:@"chevron.right" tooltip:@"下一个线路" action:@selector(lineNextAction:)];
-    self.zoomButton = [self iconButtonWithSymbol:@"macwindow" tooltip:@"全窗口 / 返回" action:@selector(toggleFullWindowAction:)];
+    self.zoomButton = [self iconButtonWithSymbol:@"eye.slash" tooltip:@"隐藏 / 恢复显示" action:@selector(toggleFullWindowAction:)];
     self.fullscreenButton = [self iconButtonWithSymbol:@"arrow.up.left.and.arrow.down.right" tooltip:@"全屏 / 返回" action:@selector(toggleFullScreenAction:)];
     self.channelPrevButton.hidden = YES;
     self.channelNextButton.hidden = YES;
     self.linePrevButton.hidden = YES;
     self.lineNextButton.hidden = YES;
 
-    self.controlBar = [NSStackView stackViewWithViews:@[self.titleLabel, self.channelPrevButton, self.channelNextButton, self.sourcePopup, self.linePrevButton, self.lineNextButton, self.episodePopup, self.hintLabel, self.zoomButton, self.fullscreenButton]];
+    self.playPauseButton = [self iconButtonWithSymbol:@"pause.fill" tooltip:@"播放 / 暂停" action:@selector(togglePlayPauseAction:)];
+
+    self.controlBar = [NSStackView stackViewWithViews:@[self.playPauseButton, self.channelPrevButton, self.channelNextButton, self.sourcePopup, self.linePrevButton, self.lineNextButton, self.episodePopup, self.hintLabel, self.zoomButton, self.fullscreenButton]];
     self.controlBar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     self.controlBar.spacing = 8;
     self.controlBar.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:self.controlBar];
+    self.controlBar.edgeInsets = NSEdgeInsetsMake(4, 10, 4, 10);
 
+    // 控制条采用毛玻璃材质覆盖在视频上显示，圆角 + 细边框，现代时尚
+    self.controlBarContainer = [[NSVisualEffectView alloc] init];
+    self.controlBarContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    self.controlBarContainer.material = NSVisualEffectMaterialHUDWindow;
+    self.controlBarContainer.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+    self.controlBarContainer.state = NSVisualEffectStateActive;
+    self.controlBarContainer.wantsLayer = YES;
+    self.controlBarContainer.layer.cornerRadius = 10;
+    self.controlBarContainer.layer.masksToBounds = YES;
+    self.controlBarContainer.layer.borderWidth = 1.0;
+    self.controlBarContainer.layer.borderColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.10].CGColor;
+    [self.controlBarContainer addSubview:self.controlBar];
+    [self.view addSubview:self.controlBarContainer];
+
+    // 视频播放组件占满整个窗口
     [NSLayoutConstraint activateConstraints:@[
         [self.playerView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
         [self.playerView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.playerView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.playerView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
     ]];
 
-    self.normalLayoutConstraints = @[
-        [self.detailLabel.topAnchor constraintEqualToAnchor:self.playerView.bottomAnchor constant:8],
-        [self.detailLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
-        [self.detailLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
-        [self.detailLabel.heightAnchor constraintEqualToConstant:110],
+    // 顶部标题覆盖层约束：覆盖在视频顶部，标题置于左上角
+    [NSLayoutConstraint activateConstraints:@[
+        [self.topTitleOverlay.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [self.topTitleOverlay.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.topTitleOverlay.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.topTitleOverlay.heightAnchor constraintEqualToConstant:72],
 
-        [self.controlBar.topAnchor constraintEqualToAnchor:self.detailLabel.bottomAnchor constant:8],
-        [self.controlBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
-        [self.controlBar.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-12],
-        [self.controlBar.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor constant:-8],
-        [self.controlBar.heightAnchor constraintEqualToConstant:30],
+        [self.titleLabel.leadingAnchor constraintEqualToAnchor:self.topTitleOverlay.leadingAnchor constant:18],
+        [self.titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.topTitleOverlay.trailingAnchor constant:-80],
+        [self.titleLabel.topAnchor constraintEqualToAnchor:self.topTitleOverlay.topAnchor constant:16],
+    ]];
 
-        [self.titleLabel.widthAnchor constraintGreaterThanOrEqualToConstant:160],
+    // 底部控制条约束：覆盖在视频底部
+    [NSLayoutConstraint activateConstraints:@[
+        [self.controlBarContainer.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
+        [self.controlBarContainer.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-12],
+        [self.controlBarContainer.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor constant:-8],
+        [self.controlBarContainer.heightAnchor constraintEqualToConstant:38],
+
+        [self.controlBar.leadingAnchor constraintEqualToAnchor:self.controlBarContainer.leadingAnchor],
+        [self.controlBar.trailingAnchor constraintEqualToAnchor:self.controlBarContainer.trailingAnchor],
+        [self.controlBar.topAnchor constraintEqualToAnchor:self.controlBarContainer.topAnchor],
+        [self.controlBar.bottomAnchor constraintEqualToAnchor:self.controlBarContainer.bottomAnchor],
+
         [self.sourcePopup.widthAnchor constraintGreaterThanOrEqualToConstant:200],
         [self.episodePopup.widthAnchor constraintGreaterThanOrEqualToConstant:120],
-    ];
-    [NSLayoutConstraint activateConstraints:self.normalLayoutConstraints];
+    ]];
 
-    self.immersiveBottomConstraint = [self.playerView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor];
-
-    // 全窗口模式下显示“返回正常窗体”按钮与 X 按钮，二者均用于返回正常窗体。
-    self.returnButton = [NSButton buttonWithTitle:@"返回正常窗体" target:self action:@selector(exitImmersiveAction:)];
-    self.returnButton.image = [NSImage imageWithSystemSymbolName:@"arrow.uturn.backward" accessibilityDescription:@"返回正常窗体"];
+    // 隐藏模式下显示“恢复显示”按钮与 X 按钮，二者均用于恢复显示除视频外的其他组件。
+    self.returnButton = [NSButton buttonWithTitle:@"恢复显示" target:self action:@selector(exitImmersiveAction:)];
+    self.returnButton.image = [NSImage imageWithSystemSymbolName:@"arrow.uturn.backward" accessibilityDescription:@"恢复显示"];
     self.returnButton.imagePosition = NSImageLeading;
     self.returnButton.bezelStyle = NSBezelStyleTexturedRounded;
+    self.returnButton.contentTintColor = [NSColor colorWithCalibratedWhite:0.92 alpha:1.0];
     self.returnButton.translatesAutoresizingMaskIntoConstraints = NO;
-    self.returnButton.hidden = YES;
 
-    self.exitButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"xmark" accessibilityDescription:@"返回正常窗体"] target:self action:@selector(exitImmersiveAction:)];
+    self.exitButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"xmark" accessibilityDescription:@"恢复显示"] target:self action:@selector(exitImmersiveAction:)];
     self.exitButton.bezelStyle = NSBezelStyleTexturedRounded;
-    self.exitButton.toolTip = @"返回正常窗体";
+    self.exitButton.contentTintColor = [NSColor colorWithCalibratedWhite:0.92 alpha:1.0];
+    self.exitButton.toolTip = @"恢复显示";
     self.exitButton.translatesAutoresizingMaskIntoConstraints = NO;
-    self.exitButton.hidden = YES;
 
-    [self.view addSubview:self.returnButton];
-    [self.view addSubview:self.exitButton];
+    // 隐藏后显示的按钮统一放在一个半透明灰色衬底容器中，保证在视频画面上清晰可见。
+    self.restoreOverlay = [[NSView alloc] init];
+    self.restoreOverlay.translatesAutoresizingMaskIntoConstraints = NO;
+    self.restoreOverlay.wantsLayer = YES;
+    self.restoreOverlay.layer.cornerRadius = 8;
+    self.restoreOverlay.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.4 alpha:0.6].CGColor;
+    self.restoreOverlay.layer.borderWidth = 1.0;
+    self.restoreOverlay.layer.borderColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.10].CGColor;
+    self.restoreOverlay.hidden = YES;
+    [self.view addSubview:self.restoreOverlay];
+
+    [self.restoreOverlay addSubview:self.returnButton];
+    [self.restoreOverlay addSubview:self.exitButton];
 
     [NSLayoutConstraint activateConstraints:@[
-        [self.exitButton.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:12],
-        [self.exitButton.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
-        [self.returnButton.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:12],
+        [self.restoreOverlay.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:12],
+        [self.restoreOverlay.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
+        [self.restoreOverlay.heightAnchor constraintEqualToConstant:36],
+
+        [self.exitButton.trailingAnchor constraintEqualToAnchor:self.restoreOverlay.trailingAnchor constant:-8],
+        [self.exitButton.centerYAnchor constraintEqualToAnchor:self.restoreOverlay.centerYAnchor],
         [self.returnButton.trailingAnchor constraintEqualToAnchor:self.exitButton.leadingAnchor constant:-8],
+        [self.returnButton.centerYAnchor constraintEqualToAnchor:self.restoreOverlay.centerYAnchor],
+        [self.returnButton.leadingAnchor constraintEqualToAnchor:self.restoreOverlay.leadingAnchor constant:8],
     ]];
 
     __weak typeof(self) weakSelf = self;
@@ -160,6 +216,12 @@ static void *PlayerItemStatusContext = &PlayerItemStatusContext;
         }
         return event;
     }];
+}
+
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    // 顶部渐变蒙版需要跟随覆盖层尺寸变化，保证缩放窗口后仍覆盖整个标题区域。
+    self.topScrimLayer.frame = self.topTitleOverlay.bounds;
 }
 
 - (void)dealloc {
@@ -200,29 +262,25 @@ static void *PlayerItemStatusContext = &PlayerItemStatusContext;
     if (immersive != self.immersive) {
         self.immersive = immersive;
         if (immersive) {
-            self.savedDetailHidden = self.detailLabel.hidden;
-            self.savedControlBarHidden = self.controlBar.hidden;
-            [NSLayoutConstraint deactivateConstraints:self.normalLayoutConstraints];
-            self.immersiveBottomConstraint.active = YES;
-            self.detailLabel.hidden = YES;
-            self.controlBar.hidden = YES;
+            // 全屏或“隐藏”模式下，只保留视频播放组件，隐藏顶部标题覆盖层与底部控制条。
+            self.savedControlBarHidden = self.controlBarContainer.hidden;
+            self.savedTopTitleOverlayHidden = self.topTitleOverlay.hidden;
+            self.controlBarContainer.hidden = YES;
+            self.topTitleOverlay.hidden = YES;
         } else {
-            self.immersiveBottomConstraint.active = NO;
-            [NSLayoutConstraint activateConstraints:self.normalLayoutConstraints];
-            self.detailLabel.hidden = self.savedDetailHidden;
-            self.controlBar.hidden = self.savedControlBarHidden;
+            self.controlBarContainer.hidden = self.savedControlBarHidden;
+            self.topTitleOverlay.hidden = self.savedTopTitleOverlayHidden;
         }
     }
-    // 仅在“全窗口”模式下显示“返回正常窗体”按钮与 X 按钮。
-    BOOL showOverlay = self.windowImmersive;
-    self.returnButton.hidden = !showOverlay;
-    self.exitButton.hidden = !showOverlay;
+    // 仅在“隐藏”模式下显示“恢复显示”按钮与 X 按钮所在的衬底容器；全屏时同样隐藏。
+    BOOL showOverlay = self.windowImmersive && !self.fullscreenActive;
+    self.restoreOverlay.hidden = !showOverlay;
 }
 
 - (BOOL)handleKeyEvent:(NSEvent *)event {
     if (!self.view.window || !self.view.window.isKeyWindow) return NO;
 
-    // 全窗口模式下按 X 键返回正常窗体。
+    // 隐藏模式下按 X 键恢复显示。
     if (self.windowImmersive) {
         NSString *chars = event.charactersIgnoringModifiers.lowercaseString;
         if ([chars isEqualToString:@"x"]) {
@@ -277,6 +335,7 @@ static void *PlayerItemStatusContext = &PlayerItemStatusContext;
     NSImage *image = [NSImage imageWithSystemSymbolName:symbolName accessibilityDescription:tooltip];
     NSButton *button = [NSButton buttonWithImage:image target:self action:action];
     button.bezelStyle = NSBezelStyleTexturedRounded;
+    button.contentTintColor = [NSColor colorWithCalibratedWhite:0.92 alpha:1.0];
     button.toolTip = tooltip;
     return button;
 }
@@ -295,6 +354,25 @@ static void *PlayerItemStatusContext = &PlayerItemStatusContext;
     [self updateImmersiveContent];
 }
 
+// 点击播放按钮来播放、暂停视频播放
+- (void)togglePlayPauseAction:(id)sender {
+    AVPlayer *player = self.playerView.player;
+    if (!player) return;
+    if (player.rate > 0) {
+        [player pause];
+    } else {
+        [player play];
+    }
+    [self updatePlayPauseButton];
+}
+
+- (void)updatePlayPauseButton {
+    BOOL playing = (self.playerView.player && self.playerView.player.rate > 0);
+    NSString *symbol = playing ? @"pause.fill" : @"play.fill";
+    self.playPauseButton.image = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:@"播放/暂停"];
+    self.playPauseButton.toolTip = playing ? @"暂停" : @"播放";
+}
+
 - (void)playVideo:(TVVideo *)video {
     [self resumeVideo:video sourceIndex:0 episodeIndex:0 resumeTime:0];
 }
@@ -310,8 +388,6 @@ static void *PlayerItemStatusContext = &PlayerItemStatusContext;
     self.liveLineIndex = 0;
     self.pendingSeekTime = resumeTime;
     self.titleLabel.stringValue = video.name ?: @"";
-    self.detailLabel.attributedStringValue = [self detailAttributedTextForVideo:video];
-    self.detailLabel.hidden = NO;
     self.episodePopup.hidden = NO;
     self.hintLabel.hidden = YES;
     self.channelPrevButton.hidden = YES;
@@ -323,7 +399,7 @@ static void *PlayerItemStatusContext = &PlayerItemStatusContext;
     [self rebuildEpisodePopup];
 
     if (self.sources.count == 0) {
-        self.controlBar.hidden = YES;
+        self.controlBarContainer.hidden = YES;
         return;
     }
 
@@ -342,7 +418,7 @@ static void *PlayerItemStatusContext = &PlayerItemStatusContext;
         }
     }
 
-    self.controlBar.hidden = NO;
+    self.controlBarContainer.hidden = NO;
     [self playCurrentEpisode];
 }
 
@@ -359,8 +435,7 @@ static void *PlayerItemStatusContext = &PlayerItemStatusContext;
     if (self.liveChannelIndex >= (NSInteger)self.liveChannels.count) self.liveChannelIndex = (NSInteger)self.liveChannels.count - 1;
     if (self.liveChannels.count == 0) {
         self.titleLabel.stringValue = @"";
-        self.detailLabel.stringValue = @"";
-        self.controlBar.hidden = YES;
+        self.controlBarContainer.hidden = YES;
         self.hintLabel.hidden = YES;
         return;
     }
@@ -380,100 +455,20 @@ static void *PlayerItemStatusContext = &PlayerItemStatusContext;
         self.liveLines = @[line];
     }
     self.titleLabel.stringValue = channel.name ?: @"";
-    self.detailLabel.stringValue = channel.group.length > 0 ? [NSString stringWithFormat:@"分组：%@", channel.group] : @"";
-    self.detailLabel.hidden = NO;
+    // 上下键或图标切换频道时同步更新播放窗体标题文字
+    if (channel.name.length > 0) {
+        self.view.window.title = channel.name;
+    }
     self.episodePopup.hidden = YES;
     self.hintLabel.hidden = NO;
     self.channelPrevButton.hidden = NO;
     self.channelNextButton.hidden = NO;
     self.linePrevButton.hidden = NO;
     self.lineNextButton.hidden = NO;
-    self.controlBar.hidden = (self.liveLines.count == 0);
+    self.controlBarContainer.hidden = (self.liveLines.count == 0);
 
     [self rebuildLiveLinePopup];
     [self playCurrentLiveLine];
-}
-
-- (NSAttributedString *)detailAttributedTextForVideo:(TVVideo *)video {
-    NSDictionary *attrs = @{
-        NSFontAttributeName: [NSFont systemFontOfSize:12],
-        NSForegroundColorAttributeName: [NSColor secondaryLabelColor],
-    };
-
-    NSMutableAttributedString *result = [[NSMutableAttributedString alloc] init];
-
-    NSMutableArray<NSString *> *meta = [NSMutableArray array];
-    if (video.typeName.length > 0) [meta addObject:video.typeName];
-    if (video.vodTime.length > 0) [meta addObject:video.vodTime];
-    if (video.remarks.length > 0) [meta addObject:video.remarks];
-
-    if (meta.count > 0) {
-        [self appendDetailLine:result text:[meta componentsJoinedByString:@"  ·  "] attrs:attrs];
-    }
-    if (video.vodDirector.length > 0) {
-        [self appendDetailLine:result text:[NSString stringWithFormat:@"导演：%@", video.vodDirector] attrs:attrs];
-    }
-    if (video.vodActor.length > 0) {
-        [self appendDetailLine:result text:[NSString stringWithFormat:@"主演：%@", video.vodActor] attrs:attrs];
-    }
-    if (video.vodContent.length > 0) {
-        [self appendDetailLine:result text:@"简介：" attrs:attrs];
-        NSAttributedString *html = [self htmlAttributedString:video.vodContent];
-        if (html.length > 0) {
-            [result appendAttributedString:html];
-        } else {
-            [result appendAttributedString:[[NSAttributedString alloc] initWithString:video.vodContent attributes:attrs]];
-        }
-    }
-
-    if (result.length == 0) {
-        return [[NSAttributedString alloc] initWithString:@"暂无详细信息" attributes:attrs];
-    }
-    return result;
-}
-
-- (void)appendDetailLine:(NSMutableAttributedString *)target text:(NSString *)text attrs:(NSDictionary *)attrs {
-    if (target.length > 0) {
-        [target appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n" attributes:attrs]];
-    }
-    [target appendAttributedString:[[NSAttributedString alloc] initWithString:text attributes:attrs]];
-}
-
-// 将简介内容按 HTML 解释，支持 <br>、<p>、<b>、<i> 等标签。
-- (NSAttributedString *)htmlAttributedString:(NSString *)html {
-    if (html.length == 0) return nil;
-    NSString *wrapped = [NSString stringWithFormat:@"<span style=\"font-size:12px;\">%@</span>", html];
-    NSData *data = [wrapped dataUsingEncoding:NSUTF8StringEncoding];
-    if (!data) return nil;
-
-    NSError *error = nil;
-    NSDictionary *options = @{
-        NSDocumentTypeDocumentAttribute: NSHTMLTextDocumentType,
-        NSCharacterEncodingDocumentAttribute: @(NSUTF8StringEncoding),
-    };
-    NSAttributedString *attr = [[NSAttributedString alloc] initWithData:data
-                                                                options:options
-                                                     documentAttributes:nil
-                                                                  error:&error];
-    if (error || attr.length == 0) return nil;
-
-    NSMutableAttributedString *normalized = [attr mutableCopy];
-    [attr enumerateAttributesInRange:NSMakeRange(0, attr.length)
-                             options:0
-                          usingBlock:^(NSDictionary<NSAttributedStringKey, id> *attributes, NSRange range, BOOL *stop) {
-        NSFont *font = attributes[NSFontAttributeName];
-        NSFontManager *fontManager = [NSFontManager sharedFontManager];
-        NSFont *newFont = [NSFont systemFontOfSize:12];
-        if (font && ([fontManager traitsOfFont:font] & NSBoldFontMask)) {
-            newFont = [fontManager convertFont:newFont toHaveTrait:NSBoldFontMask];
-        }
-        if (font && ([fontManager traitsOfFont:font] & NSItalicFontMask)) {
-            newFont = [fontManager convertFont:newFont toHaveTrait:NSItalicFontMask];
-        }
-        [normalized addAttribute:NSFontAttributeName value:newFont range:range];
-        [normalized addAttribute:NSForegroundColorAttributeName value:[NSColor secondaryLabelColor] range:range];
-    }];
-    return normalized;
 }
 
 - (void)stop {
@@ -483,6 +478,7 @@ static void *PlayerItemStatusContext = &PlayerItemStatusContext;
         [self.currentItem removeObserver:self forKeyPath:@"status" context:PlayerItemStatusContext];
         self.currentItem = nil;
     }
+    [self updatePlayPauseButton];
 }
 
 - (NSTimeInterval)currentPlaybackTime {
@@ -625,9 +621,17 @@ static void *PlayerItemStatusContext = &PlayerItemStatusContext;
     self.currentItem = item;
     [item addObserver:self forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:PlayerItemStatusContext];
 
-    AVPlayer *player = [AVPlayer playerWithPlayerItem:item];
-    self.playerView.player = player;
+    // 复用同一个 AVPlayer，通过 replaceCurrentItemWithPlayerItem: 切换内容。
+    // 每次切换频道/线路都新建 AVPlayer 并整体替换 playerView.player，会导致上一个
+    // 播放器在尚未停止的状态下被释放，其音频输出可能残留，与新内容的声音同时播放。
+    AVPlayer *player = self.playerView.player;
+    if (!player) {
+        player = [[AVPlayer alloc] init];
+        self.playerView.player = player;
+    }
+    [player replaceCurrentItemWithPlayerItem:item];
     [player play];
+    [self updatePlayPauseButton];
 }
 
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context {
