@@ -6,7 +6,9 @@
 
 static NSString *const kVODItemIdentifier = @"VODItemIdentifier";
 static NSString *const kTVBoxHistoryKey = @"TVBoxHistory";
+static NSString *const kTVBoxFavoritesKey = @"TVBoxFavorites";
 static NSString *const kTVBoxSearchKeywordsKey = @"TVBoxSearchKeywords";
+static NSString *const kTVBoxFavoriteDragType = @"com.TVBox.favorite.drag";
 static const NSUInteger kTVBoxHistoryLimit = 30;
 static const NSUInteger kTVBoxSearchKeywordsLimit = 12;
 
@@ -152,6 +154,199 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     }
     return self;
 }
+@end
+
+// 直播频道单元格：频道名 + 右侧可点击的“节目单”链接（有节目单时才显示）+ 收藏按钮（悬停显示）
+@interface TVChannelCellView : NSTableCellView
+@property (nonatomic, strong) NSTextField *nameLabel;
+@property (nonatomic, strong) NSButton *programLink;
+@property (nonatomic, strong) NSButton *favoriteButton;
+@property (nonatomic, copy) void (^onProgramClick)(void);
+@property (nonatomic, copy) void (^onFavoriteClick)(void);
+@property (nonatomic, assign) BOOL favorited;
+- (void)refreshHoverState;
+@end
+
+@implementation TVChannelCellView {
+    BOOL _hovered;
+}
+
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    self = [super initWithFrame:frameRect];
+    if (self) {
+        _nameLabel = [NSTextField labelWithString:@""];
+        _nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        [self addSubview:_nameLabel];
+
+        NSMutableAttributedString *linkTitle = [[NSMutableAttributedString alloc] initWithString:@"节目单" attributes:@{
+            NSForegroundColorAttributeName: [NSColor linkColor],
+            NSFontAttributeName: [NSFont systemFontOfSize:11],
+            NSUnderlineStyleAttributeName: @(NSUnderlineStyleSingle),
+        }];
+        _programLink = [NSButton buttonWithTitle:@"" target:self action:@selector(programLinkClicked:)];
+        _programLink.attributedTitle = linkTitle;
+        _programLink.bordered = NO;
+        _programLink.translatesAutoresizingMaskIntoConstraints = NO;
+        [self addSubview:_programLink];
+
+        _favoriteButton = [NSButton buttonWithTitle:@"" target:self action:@selector(favoriteButtonClicked:)];
+        _favoriteButton.bordered = NO;
+        _favoriteButton.imagePosition = NSImageOnly;
+        _favoriteButton.translatesAutoresizingMaskIntoConstraints = NO;
+        _favoriteButton.hidden = YES;
+        [self addSubview:_favoriteButton];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [_favoriteButton.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:4],
+            [_favoriteButton.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [_favoriteButton.widthAnchor constraintEqualToConstant:18],
+            [_favoriteButton.heightAnchor constraintEqualToConstant:18],
+
+            [_nameLabel.leadingAnchor constraintEqualToAnchor:_favoriteButton.trailingAnchor constant:6],
+            [_nameLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [_programLink.leadingAnchor constraintEqualToAnchor:_nameLabel.trailingAnchor constant:8],
+            [_programLink.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [_programLink.trailingAnchor constraintLessThanOrEqualToAnchor:self.trailingAnchor constant:-4],
+        ]];
+        [_nameLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [_programLink setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [_favoriteButton setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    }
+    return self;
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    for (NSTrackingArea *area in self.trackingAreas) {
+        [self removeTrackingArea:area];
+    }
+    NSTrackingArea *area = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+                                                        options:(NSTrackingMouseEnteredAndExited | NSTrackingActiveInActiveApp | NSTrackingInVisibleRect)
+                                                          owner:self
+                                                       userInfo:nil];
+    [self addTrackingArea:area];
+}
+
+- (void)mouseEntered:(NSEvent *)event {
+    _hovered = YES;
+    [self updateFavoriteButton];
+}
+
+- (void)mouseExited:(NSEvent *)event {
+    _hovered = NO;
+    [self updateFavoriteButton];
+}
+
+- (void)setFavorited:(BOOL)favorited {
+    _favorited = favorited;
+    [self updateFavoriteButton];
+}
+
+- (void)refreshHoverState {
+    BOOL inside = NO;
+    NSWindow *window = self.window;
+    if (window) {
+        NSPoint mouseInWindow = [window mouseLocationOutsideOfEventStream];
+        NSPoint mouseInView = [self convertPoint:mouseInWindow fromView:nil];
+        inside = NSPointInRect(mouseInView, self.bounds);
+    }
+    _hovered = inside;
+    [self updateFavoriteButton];
+}
+
+- (void)updateFavoriteButton {
+    BOOL visible = self.favorited || _hovered;
+    self.favoriteButton.hidden = !visible;
+    self.favoriteButton.image = [NSImage imageWithSystemSymbolName:(self.favorited ? @"star.fill" : @"star")
+                                         accessibilityDescription:nil];
+    self.favoriteButton.toolTip = self.favorited ? @"已收藏，点击取消收藏" : @"收藏";
+}
+
+- (void)programLinkClicked:(id)sender {
+    if (self.onProgramClick) self.onProgramClick();
+}
+
+- (void)favoriteButtonClicked:(id)sender {
+    if (self.onFavoriteClick) self.onFavoriteClick();
+}
+
+@end
+
+// 收藏夹单元格：名称 + 悬停显示的删除按钮
+@interface TVFavoriteCellView : NSTableCellView
+@property (nonatomic, strong) NSTextField *nameLabel;
+@property (nonatomic, strong) NSButton *deleteButton;
+@property (nonatomic, copy) void (^onDelete)(void);
+@end
+
+@implementation TVFavoriteCellView {
+    NSLayoutConstraint *_deleteWidthConstraint;
+    BOOL _hovered;
+}
+
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    self = [super initWithFrame:frameRect];
+    if (self) {
+        _nameLabel = [NSTextField labelWithString:@""];
+        _nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        [self addSubview:_nameLabel];
+
+        _deleteButton = [NSButton buttonWithTitle:@"" target:self action:@selector(deleteButtonClicked:)];
+        _deleteButton.bordered = NO;
+        _deleteButton.imagePosition = NSImageOnly;
+        _deleteButton.image = [NSImage imageWithSystemSymbolName:@"trash" accessibilityDescription:@"删除"];
+        _deleteButton.contentTintColor = [NSColor systemRedColor];
+        _deleteButton.toolTip = @"删除";
+        _deleteButton.translatesAutoresizingMaskIntoConstraints = NO;
+        _deleteButton.hidden = YES;
+        [self addSubview:_deleteButton];
+        _deleteWidthConstraint = [_deleteButton.widthAnchor constraintEqualToConstant:0];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [_nameLabel.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:4],
+            [_nameLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [_nameLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_deleteButton.leadingAnchor constant:-6],
+            [_deleteButton.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-4],
+            [_deleteButton.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [_deleteButton.heightAnchor constraintEqualToConstant:18],
+            _deleteWidthConstraint,
+        ]];
+        [_nameLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [_deleteButton setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    }
+    return self;
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    for (NSTrackingArea *area in self.trackingAreas) {
+        [self removeTrackingArea:area];
+    }
+    NSTrackingArea *area = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+                                                        options:(NSTrackingMouseEnteredAndExited | NSTrackingActiveInActiveApp | NSTrackingInVisibleRect)
+                                                          owner:self
+                                                       userInfo:nil];
+    [self addTrackingArea:area];
+}
+
+- (void)mouseEntered:(NSEvent *)event {
+    _hovered = YES;
+    self.deleteButton.hidden = NO;
+    _deleteWidthConstraint.constant = 18;
+}
+
+- (void)mouseExited:(NSEvent *)event {
+    _hovered = NO;
+    self.deleteButton.hidden = YES;
+    _deleteWidthConstraint.constant = 0;
+}
+
+- (void)deleteButtonClicked:(id)sender {
+    if (self.onDelete) self.onDelete();
+}
+
 @end
 
 @interface VODCollectionItem : NSCollectionViewItem
@@ -310,6 +505,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 @property (nonatomic, strong) NSView *searchView;
 @property (nonatomic, strong) NSView *vodView;
 @property (nonatomic, strong) NSView *liveView;
+@property (nonatomic, strong) NSView *favoritesView;
 @property (nonatomic, strong) NSView *historyView;
 @property (nonatomic, strong) NSView *settingsView;
 @property (nonatomic, strong) NSView *aboutView;
@@ -353,21 +549,34 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 @property (nonatomic, strong) NSArray<TVLiveChannel *> *liveChannels;
 @property (nonatomic, strong) NSArray<TVLiveChannel *> *displayedLiveChannels;
 @property (nonatomic, copy) NSSortDescriptor *liveSortDescriptor;
+@property (nonatomic, assign) NSInteger liveEPGGeneration;
 
 @property (nonatomic, strong) NSTextField *vodConfigURLField;
 @property (nonatomic, strong) NSTextField *liveConfigURLField;
+@property (nonatomic, strong) NSTextField *settingsProgressLabel;
+@property (nonatomic, strong) NSTextField *vodValidationResultLabel;
+@property (nonatomic, strong) NSTextField *liveValidationResultLabel;
 
 @property (nonatomic, strong) NSTableView *historyTable;
 @property (nonatomic, strong) NSMutableArray<TVHistoryItem *> *historyItems;
 @property (nonatomic, strong) TVHistoryItem *currentHistoryItem;
 
+@property (nonatomic, strong) NSTableView *favoritesTable;
+@property (nonatomic, strong) NSMutableArray<TVFavoriteItem *> *favoritesItems;
+
 @property (nonatomic, strong) NSWindow *playerWindow;
 @property (nonatomic, strong) NSTextField *statusLabel;
+
+// 节目单模态窗口（直播频道点击“节目单”链接后弹出）
+@property (nonatomic, strong) NSWindow *programModalWindow;
+@property (nonatomic, strong) NSTableView *programTable;
+@property (nonatomic, strong) NSArray<TVLiveProgram *> *programModalItems;
 
 // 视频详情模态窗口（点播列表点击后展示介绍信息与可播放列表）
 @property (nonatomic, strong) NSWindow *detailModalWindow;
 @property (nonatomic, strong) NSPopUpButton *detailModalLinePopup;
 @property (nonatomic, strong) NSPopUpButton *detailModalEpisodePopup;
+@property (nonatomic, strong) NSButton *detailModalFavoriteButton;
 @property (nonatomic, strong) TVVideo *detailModalVideo;
 @property (nonatomic, strong) TVSite *detailModalSite;
 
@@ -390,9 +599,11 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     self.unavailableSourceURLs = [NSMutableSet set];
     self.selectedCategoryId = 0;
     self.historyItems = [NSMutableArray array];
+    self.favoritesItems = [NSMutableArray array];
 
     [self buildUI];
     [self loadHistory];
+    [self loadFavorites];
     [self loadSearchKeywords];
     [self rebuildSearchKeywordsBar];
 
@@ -412,12 +623,13 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 - (void)buildUI {
     NSView *root = self.view;
 
-    self.sidebarItems = @[@"TVBox数据源列表", @"搜索", @"点播", @"直播", @"历史", @"设置", @"关于"];
+    self.sidebarItems = @[@"TVBox数据源列表", @"搜索", @"点播", @"直播", @"收藏夹", @"历史", @"设置", @"关于"];
     [self buildSidebar];
     self.dataSourcesView = [self buildDataSourcesView];
     self.searchView = [self buildSearchView];
     self.vodView = [self buildVODView];
     self.liveView = [self buildLiveView];
+    self.favoritesView = [self buildFavoritesView];
     self.historyView = [self buildHistoryView];
     self.settingsView = [self buildSettingsView];
     self.aboutView = [self buildAboutView];
@@ -427,7 +639,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     [root addSubview:self.contentContainer];
 
     self.contentViews = @[self.dataSourcesView, self.searchView, self.vodView,
-                          self.liveView, self.historyView, self.settingsView, self.aboutView];
+                          self.liveView, self.favoritesView, self.historyView, self.settingsView, self.aboutView];
     NSMutableArray<NSArray<NSLayoutConstraint *> *> *pinSets = [NSMutableArray array];
     for (NSView *view in self.contentViews) {
         view.translatesAutoresizingMaskIntoConstraints = NO;
@@ -836,6 +1048,81 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
         [tableScroll.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-12],
         [tableScroll.bottomAnchor constraintEqualToAnchor:container.bottomAnchor constant:-12],
     ]];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(liveTableScrolled:)
+                                                 name:NSViewBoundsDidChangeNotification
+                                               object:tableScroll.contentView];
+
+    return container;
+}
+
+- (NSView *)buildFavoritesView {
+    NSView *container = [[NSView alloc] init];
+
+    NSTextField *title = [NSTextField labelWithString:@"收藏夹"];
+    title.font = [NSFont systemFontOfSize:18 weight:NSFontWeightSemibold];
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSTextField *hint = [NSTextField labelWithString:@"拖动调整顺序 · 悬停删除 · 双击播放"];
+    hint.font = [NSFont systemFontOfSize:12];
+    hint.textColor = [NSColor secondaryLabelColor];
+    hint.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.favoritesTable = [[NSTableView alloc] initWithFrame:NSZeroRect];
+    self.favoritesTable.identifier = @"favorites";
+    self.favoritesTable.dataSource = self;
+    self.favoritesTable.delegate = self;
+    self.favoritesTable.usesAlternatingRowBackgroundColors = YES;
+    self.favoritesTable.rowHeight = 36;
+    self.favoritesTable.allowsColumnResizing = YES;
+    self.favoritesTable.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
+    self.favoritesTable.target = self;
+    self.favoritesTable.doubleAction = @selector(favoriteRowDoubleClicked:);
+    [self.favoritesTable registerForDraggedTypes:@[kTVBoxFavoriteDragType]];
+    [self.favoritesTable setDraggingSourceOperationMask:NSDragOperationMove forLocal:YES];
+
+    NSTableColumn *nameColumn = [[NSTableColumn alloc] initWithIdentifier:@"name"];
+    nameColumn.title = @"名称";
+    nameColumn.width = 300;
+    nameColumn.resizingMask = NSTableColumnAutoresizingMask | NSTableColumnUserResizingMask;
+
+    NSTableColumn *typeColumn = [[NSTableColumn alloc] initWithIdentifier:@"type"];
+    typeColumn.title = @"类型";
+    typeColumn.width = 80;
+    typeColumn.resizingMask = NSTableColumnAutoresizingMask | NSTableColumnUserResizingMask;
+
+    NSTableColumn *detailColumn = [[NSTableColumn alloc] initWithIdentifier:@"detail"];
+    detailColumn.title = @"详情";
+    detailColumn.width = 420;
+    detailColumn.resizingMask = NSTableColumnAutoresizingMask | NSTableColumnUserResizingMask;
+
+    [self.favoritesTable addTableColumn:nameColumn];
+    [self.favoritesTable addTableColumn:typeColumn];
+    [self.favoritesTable addTableColumn:detailColumn];
+
+    NSScrollView *scroll = [[NSScrollView alloc] init];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    scroll.hasVerticalScroller = YES;
+    scroll.autohidesScrollers = YES;
+    scroll.documentView = self.favoritesTable;
+
+    [container addSubview:title];
+    [container addSubview:hint];
+    [container addSubview:scroll];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [title.topAnchor constraintEqualToAnchor:container.topAnchor constant:12],
+        [title.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:12],
+
+        [hint.centerYAnchor constraintEqualToAnchor:title.centerYAnchor],
+        [hint.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-12],
+
+        [scroll.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:10],
+        [scroll.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:12],
+        [scroll.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-12],
+        [scroll.bottomAnchor constraintEqualToAnchor:container.bottomAnchor constant:-12],
+    ]];
     return container;
 }
 
@@ -926,7 +1213,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     title.font = [NSFont systemFontOfSize:18 weight:NSFontWeightSemibold];
     title.translatesAutoresizingMaskIntoConstraints = NO;
 
-    NSTextField *hintLabel = [NSTextField labelWithString:@"视频数据源分为两个部分：点播数据源（主数据源，必填）与直播视频源（专属直播的数据源，选填）。点播数据源仅支持填写一个 URL，保存前会进行可访问、可解析验证；若该地址包含直播数据源，可从中选择一个保存到直播数据源。修改后点击「保存并重新加载」立即生效。"];
+    NSTextField *hintLabel = [NSTextField labelWithString:@"视频数据源分为两个部分：点播数据源（主数据源，必填）与直播视频源（专属直播的数据源，选填）。点播数据源仅支持填写一个 URL，可点击输入框旁的「验证」按钮单独验证，保存前也会进行可访问、可解析验证；若该地址包含直播数据源，可从中选择一个保存到直播数据源。修改后点击「保存并重新加载」立即生效。"];
     hintLabel.translatesAutoresizingMaskIntoConstraints = NO;
     hintLabel.font = [NSFont systemFontOfSize:12];
     hintLabel.textColor = [NSColor secondaryLabelColor];
@@ -945,6 +1232,19 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     self.vodConfigURLField.controlSize = NSControlSizeLarge;
     self.vodConfigURLField.translatesAutoresizingMaskIntoConstraints = NO;
 
+    NSButton *vodValidateButton = [NSButton buttonWithTitle:@"验证" target:self action:@selector(validateVODURLAction:)];
+    vodValidateButton.bezelStyle = NSBezelStyleRounded;
+    vodValidateButton.image = [NSImage imageWithSystemSymbolName:@"checkmark.seal" accessibilityDescription:@"验证"];
+    vodValidateButton.imagePosition = NSImageLeading;
+    vodValidateButton.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.vodValidationResultLabel = [NSTextField wrappingLabelWithString:@""];
+    self.vodValidationResultLabel.font = [NSFont systemFontOfSize:12];
+    self.vodValidationResultLabel.textColor = [NSColor secondaryLabelColor];
+    self.vodValidationResultLabel.maximumNumberOfLines = 0;
+    self.vodValidationResultLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    self.vodValidationResultLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
     // ---- 直播视频源（专属直播的数据源，选填） ----
     NSTextField *liveTitle = [NSTextField labelWithString:@"直播视频源（专属直播的数据源，选填）"];
     liveTitle.font = [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold];
@@ -956,6 +1256,19 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     self.liveConfigURLField.controlSize = NSControlSizeLarge;
     self.liveConfigURLField.translatesAutoresizingMaskIntoConstraints = NO;
 
+    NSButton *liveValidateButton = [NSButton buttonWithTitle:@"验证" target:self action:@selector(validateLiveURLAction:)];
+    liveValidateButton.bezelStyle = NSBezelStyleRounded;
+    liveValidateButton.image = [NSImage imageWithSystemSymbolName:@"checkmark.seal" accessibilityDescription:@"验证"];
+    liveValidateButton.imagePosition = NSImageLeading;
+    liveValidateButton.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.liveValidationResultLabel = [NSTextField wrappingLabelWithString:@""];
+    self.liveValidationResultLabel.font = [NSFont systemFontOfSize:12];
+    self.liveValidationResultLabel.textColor = [NSColor secondaryLabelColor];
+    self.liveValidationResultLabel.maximumNumberOfLines = 0;
+    self.liveValidationResultLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    self.liveValidationResultLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
     // ---- 保存 ----
     NSButton *saveButton = [NSButton buttonWithTitle:@"保存并重新加载" target:self action:@selector(saveConfigURLAction:)];
     saveButton.bezelStyle = NSBezelStyleRounded;
@@ -963,13 +1276,26 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     saveButton.imagePosition = NSImageLeading;
     saveButton.translatesAutoresizingMaskIntoConstraints = NO;
 
+    // ---- 验证进度显示（逐步展示地址格式 / 可访问 / 可解析 / 数据格式校验等详细过程） ----
+    self.settingsProgressLabel = [NSTextField wrappingLabelWithString:@""];
+    self.settingsProgressLabel.font = [NSFont systemFontOfSize:12];
+    self.settingsProgressLabel.textColor = [NSColor secondaryLabelColor];
+    self.settingsProgressLabel.maximumNumberOfLines = 0;
+    self.settingsProgressLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    self.settingsProgressLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
     [container addSubview:title];
     [container addSubview:hintLabel];
     [container addSubview:vodTitle];
     [container addSubview:self.vodConfigURLField];
+    [container addSubview:vodValidateButton];
+    [container addSubview:self.vodValidationResultLabel];
     [container addSubview:liveTitle];
     [container addSubview:self.liveConfigURLField];
+    [container addSubview:liveValidateButton];
+    [container addSubview:self.liveValidationResultLabel];
     [container addSubview:saveButton];
+    [container addSubview:self.settingsProgressLabel];
 
     [NSLayoutConstraint activateConstraints:@[
         [title.topAnchor constraintEqualToAnchor:container.topAnchor constant:16],
@@ -984,17 +1310,33 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 
         [self.vodConfigURLField.topAnchor constraintEqualToAnchor:vodTitle.bottomAnchor constant:8],
         [self.vodConfigURLField.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
-        [self.vodConfigURLField.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
+        [self.vodConfigURLField.trailingAnchor constraintEqualToAnchor:vodValidateButton.leadingAnchor constant:-8],
+        [vodValidateButton.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
+        [vodValidateButton.centerYAnchor constraintEqualToAnchor:self.vodConfigURLField.centerYAnchor],
 
-        [liveTitle.topAnchor constraintEqualToAnchor:self.vodConfigURLField.bottomAnchor constant:20],
+        [self.vodValidationResultLabel.topAnchor constraintEqualToAnchor:self.vodConfigURLField.bottomAnchor constant:6],
+        [self.vodValidationResultLabel.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
+        [self.vodValidationResultLabel.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
+
+        [liveTitle.topAnchor constraintEqualToAnchor:self.vodValidationResultLabel.bottomAnchor constant:16],
         [liveTitle.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
 
         [self.liveConfigURLField.topAnchor constraintEqualToAnchor:liveTitle.bottomAnchor constant:8],
         [self.liveConfigURLField.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
-        [self.liveConfigURLField.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
+        [self.liveConfigURLField.trailingAnchor constraintEqualToAnchor:liveValidateButton.leadingAnchor constant:-8],
+        [liveValidateButton.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
+        [liveValidateButton.centerYAnchor constraintEqualToAnchor:self.liveConfigURLField.centerYAnchor],
 
-        [saveButton.topAnchor constraintEqualToAnchor:self.liveConfigURLField.bottomAnchor constant:16],
+        [self.liveValidationResultLabel.topAnchor constraintEqualToAnchor:self.liveConfigURLField.bottomAnchor constant:6],
+        [self.liveValidationResultLabel.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
+        [self.liveValidationResultLabel.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
+
+        [saveButton.topAnchor constraintEqualToAnchor:self.liveValidationResultLabel.bottomAnchor constant:16],
         [saveButton.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
+
+        [self.settingsProgressLabel.topAnchor constraintEqualToAnchor:saveButton.bottomAnchor constant:12],
+        [self.settingsProgressLabel.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
+        [self.settingsProgressLabel.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
     ]];
 
     [self loadConfigURLRows];
@@ -1018,7 +1360,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     title.textColor = [NSColor whiteColor];
     title.translatesAutoresizingMaskIntoConstraints = NO;
 
-    NSTextField *version = [NSTextField labelWithString:@"版本 v0.0.1"];
+    NSTextField *version = [NSTextField labelWithString:@"版本 v0.1.0"];
     version.textColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.85];
     version.translatesAutoresizingMaskIntoConstraints = NO;
 
@@ -1205,6 +1547,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
                                      @"magnifyingglass",
                                      @"play.rectangle",
                                      @"dot.radiowaves.left.and.right",
+                                     @"star",
                                      @"clock",
                                      @"gearshape",
                                      @"info.circle"];
@@ -1994,6 +2337,14 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     [root addSubview:titleLabel];
 
+    // 收藏按钮：空心/填充星形图标切换收藏状态
+    NSButton *favoriteButton = [NSButton buttonWithTitle:@"收藏" target:self action:@selector(detailModalFavoriteAction:)];
+    favoriteButton.translatesAutoresizingMaskIntoConstraints = NO;
+    favoriteButton.bezelStyle = NSBezelStyleRounded;
+    favoriteButton.imagePosition = NSImageLeading;
+    [root addSubview:favoriteButton];
+    self.detailModalFavoriteButton = favoriteButton;
+
     // 元信息（类型 · 年代 · 备注 / 导演 / 主演）
     NSTextField *metaLabel = [NSTextField wrappingLabelWithString:[self modalMetaTextForVideo:detail]];
     metaLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2092,6 +2443,9 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
         [titleLabel.leadingAnchor constraintEqualToAnchor:posterView.trailingAnchor constant:20],
         [titleLabel.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-20],
 
+        [favoriteButton.topAnchor constraintEqualToAnchor:posterView.bottomAnchor constant:12],
+        [favoriteButton.leadingAnchor constraintEqualToAnchor:posterView.leadingAnchor],
+
         [metaLabel.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:6],
         [metaLabel.leadingAnchor constraintEqualToAnchor:titleLabel.leadingAnchor],
         [metaLabel.trailingAnchor constraintEqualToAnchor:titleLabel.trailingAnchor],
@@ -2131,6 +2485,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     ]];
 
     [self detailModalLineChanged:linePopup];
+    [self updateDetailFavoriteButtonState];
 
     [self.view.window beginSheet:modal completionHandler:^(NSModalResponse returnCode) {
         if (returnCode == NSModalResponseOK) {
@@ -2342,8 +2697,156 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
                 [self rebuildLiveGroupPopup];
                 [self applyLiveFilterAndSort];
                 [self setStatus:@""];
+                [self loadProgramSchedulesForChannels:self.liveChannels];
             }
         }];
+    }
+}
+
+// 当前直播场景使用的 EPG 地址：优先取选中的直播源，否则取第一个携带 epg 的可用直播源
+- (NSString *)currentLiveEPGURL {
+    TVLiveSource *selected = (TVLiveSource *)self.liveSourcePopup.selectedItem.representedObject;
+    if (selected && selected.epg.length > 0) {
+        return selected.epg;
+    }
+    for (TVLiveSource *source in [self availableLiveSources]) {
+        if (source.epg.length > 0) {
+            return source.epg;
+        }
+    }
+    return nil;
+}
+
+// 后台拉取各频道的节目单，成功后逐条刷新表格，频道有节目单时显示“节目单”链接
+- (void)loadProgramSchedulesForChannels:(NSArray<TVLiveChannel *> *)channels {
+    NSString *epgURL = [self currentLiveEPGURL];
+    if (epgURL.length == 0) {
+        for (TVLiveChannel *channel in channels) {
+            channel.programs = @[];
+        }
+        return;
+    }
+
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (TVLiveChannel *channel in channels) {
+        if (channel.name.length > 0 && ![names containsObject:channel.name]) {
+            [names addObject:channel.name];
+        }
+    }
+    if (names.count == 0) return;
+
+    NSInteger generation = ++self.liveEPGGeneration;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(4);
+        for (NSString *name in names) {
+            if (generation != self.liveEPGGeneration) break;
+            dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+            [self.config fetchProgramsForChannel:name
+                                         epgURL:epgURL
+                                     completion:^(NSArray<TVLiveProgram *> * _Nullable programs) {
+                if (generation == self.liveEPGGeneration) {
+                    NSArray<TVLiveProgram *> *result = (programs.count > 0) ? programs : @[];
+                    for (TVLiveChannel *channel in channels) {
+                        if ([channel.name isEqualToString:name]) {
+                            channel.programs = result;
+                        }
+                    }
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (generation == self.liveEPGGeneration) {
+                            [self.liveTable reloadData];
+                        }
+                    });
+                }
+                dispatch_semaphore_signal(semaphore);
+            }];
+        }
+    });
+}
+
+// 弹出模态窗体显示某个频道的节目单
+- (void)showProgramScheduleForChannel:(TVLiveChannel *)channel {
+    NSArray<TVLiveProgram *> *programs = channel.programs ?: @[];
+    if (programs.count == 0) return;
+
+    self.programModalItems = programs;
+
+    NSWindow *modal = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 480, 560)
+                                                   styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
+                                                     backing:NSBackingStoreBuffered
+                                                       defer:NO];
+    modal.title = [NSString stringWithFormat:@"%@ · 节目单", channel.name ?: @""];
+    modal.releasedWhenClosed = NO;
+    self.programModalWindow = modal;
+
+    NSView *root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 480, 560)];
+    modal.contentView = root;
+
+    NSTextField *header = [NSTextField labelWithString:[NSString stringWithFormat:@"%@（共 %lu 条）", channel.name ?: @"", (unsigned long)programs.count]];
+    header.translatesAutoresizingMaskIntoConstraints = NO;
+    header.font = [NSFont boldSystemFontOfSize:15];
+    header.lineBreakMode = NSLineBreakByTruncatingTail;
+    [root addSubview:header];
+
+    NSTableView *table = [[NSTableView alloc] initWithFrame:NSZeroRect];
+    table.dataSource = self;
+    table.delegate = self;
+    table.usesAlternatingRowBackgroundColors = YES;
+    table.rowHeight = 26;
+    table.allowsColumnResizing = YES;
+
+    NSTableColumn *timeColumn = [[NSTableColumn alloc] initWithIdentifier:@"time"];
+    timeColumn.title = @"时间";
+    timeColumn.width = 110;
+    timeColumn.minWidth = 90;
+    timeColumn.resizingMask = NSTableColumnAutoresizingMask | NSTableColumnUserResizingMask;
+
+    NSTableColumn *titleColumn = [[NSTableColumn alloc] initWithIdentifier:@"title"];
+    titleColumn.title = @"节目";
+    titleColumn.width = 330;
+    titleColumn.resizingMask = NSTableColumnAutoresizingMask | NSTableColumnUserResizingMask;
+
+    [table addTableColumn:timeColumn];
+    [table addTableColumn:titleColumn];
+
+    NSScrollView *scroll = [[NSScrollView alloc] init];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    scroll.hasVerticalScroller = YES;
+    scroll.autohidesScrollers = YES;
+    scroll.documentView = table;
+    [root addSubview:scroll];
+
+    NSButton *closeButton = [NSButton buttonWithTitle:@"关闭" target:self action:@selector(programModalCloseAction:)];
+    closeButton.translatesAutoresizingMaskIntoConstraints = NO;
+    closeButton.bezelStyle = NSBezelStyleRounded;
+    closeButton.keyEquivalent = @"\e";
+    [root addSubview:closeButton];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [header.topAnchor constraintEqualToAnchor:root.topAnchor constant:14],
+        [header.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:16],
+        [header.trailingAnchor constraintLessThanOrEqualToAnchor:root.trailingAnchor constant:-16],
+
+        [scroll.topAnchor constraintEqualToAnchor:header.bottomAnchor constant:10],
+        [scroll.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:12],
+        [scroll.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-12],
+        [scroll.bottomAnchor constraintEqualToAnchor:closeButton.topAnchor constant:-10],
+
+        [closeButton.centerXAnchor constraintEqualToAnchor:root.centerXAnchor],
+        [closeButton.bottomAnchor constraintEqualToAnchor:root.bottomAnchor constant:-12],
+    ]];
+
+    self.programTable = table;
+    [self.view.window beginSheet:modal completionHandler:^(NSModalResponse returnCode) {
+        self.programTable = nil;
+        self.programModalItems = nil;
+        self.programModalWindow = nil;
+    }];
+}
+
+- (void)programModalCloseAction:(id)sender {
+    if (self.programModalWindow) {
+        [self.view.window endSheet:self.programModalWindow];
+        [self.programModalWindow orderOut:nil];
     }
 }
 
@@ -2562,6 +3065,24 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     [self setStatus:[NSString stringWithFormat:@"已复制数据源地址：%@", url]];
 }
 
+- (void)liveTableScrolled:(NSNotification *)note {
+    [self refreshLiveHoverStates];
+}
+
+- (void)refreshLiveHoverStates {
+    NSInteger channelColumn = [self.liveTable columnWithIdentifier:@"channel"];
+    if (channelColumn < 0) return;
+    NSRect visible = self.liveTable.visibleRect;
+    NSRange range = [self.liveTable rowsInRect:visible];
+    NSInteger end = (NSInteger)(range.location + range.length);
+    for (NSInteger row = range.location; row < end; row++) {
+        NSView *view = [self.liveTable viewAtColumn:channelColumn row:row makeIfNecessary:NO];
+        if ([view isKindOfClass:[TVChannelCellView class]]) {
+            [(TVChannelCellView *)view refreshHoverState];
+        }
+    }
+}
+
 - (void)liveRowDoubleClicked:(id)sender {
     NSInteger row = self.liveTable.clickedRow;
     if (row < 0 || row >= (NSInteger)self.displayedLiveChannels.count) return;
@@ -2641,45 +3162,168 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 - (void)saveConfigURLAction:(id)sender {
     // 结束当前编辑，确保已输入内容提交
     [self.view.window makeFirstResponder:nil];
+    [self setSettingsProgress:@""];
 
     NSString *vodURL = [self.vodConfigURLField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     NSString *liveURL = [self.liveConfigURLField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 
-    // 未填写点播数据源时，仅保存直播数据源
+    // 未填写点播数据源时：清空点播源，仅处理直播数据源
     if (vodURL.length == 0) {
         [self.config saveConfigURLs:@[]];
-        [self.config saveLiveConfigURLs:(liveURL.length > 0 ? @[liveURL] : @[])];
-        [self loadConfigURLRows];
-        [self reloadConfig];
+        if (liveURL.length > 0) {
+            // 直播数据源单独进行详细验证后保存
+            [self validateLiveURLAndSave:liveURL];
+        } else {
+            [self.config saveLiveConfigURLs:@[]];
+            [self loadConfigURLRows];
+            [self reloadConfig];
+        }
         return;
     }
 
-    // 点播数据源必须经过可访问、可解析、TVBox 格式验证后才能保存
-    [self setStatus:@"正在验证点播数据源…"];
-    [self.config validateVODConfigURL:vodURL completion:^(NSArray<TVLiveSource *> * _Nullable detectedLives, NSError * _Nullable error) {
+    // 点播数据源必须经过可访问、可解析、TVBox 格式验证后才能保存，验证过程逐步展示
+    [self.config validateVODConfigURL:vodURL progress:^(NSString *step) {
+        [self setSettingsProgress:step];
+        [self showValidationProgress:step forLabel:self.vodValidationResultLabel];
+    } completion:^(NSArray<TVLiveSource *> * _Nullable detectedLives, NSError * _Nullable error) {
         if (error) {
-            [self setStatus:@""];
+            [self setSettingsProgress:@""];
+            [self showValidationFailure:error.localizedDescription forLabel:self.vodValidationResultLabel];
             [self showErrorAlertWithMessage:error.localizedDescription];
             return;
         }
-        [self setStatus:@""];
+        [self showValidationSuccess:@"✓ 点播数据源验证通过。" forLabel:self.vodValidationResultLabel];
         [self.config saveConfigURLs:@[vodURL]];
 
         // 该配置包含直播数据源时，提供列表供用户选择是否保存
         if (detectedLives.count > 0) {
-            [self presentLiveSourcePicker:detectedLives completion:^(NSString * _Nullable chosenURL) {
-                NSString *finalLive = chosenURL.length > 0 ? chosenURL : liveURL;
-                [self.config saveLiveConfigURLs:(finalLive.length > 0 ? @[finalLive] : @[])];
-                [self loadConfigURLRows];
-                [self reloadConfig];
+            [self presentLiveSourcePicker:detectedLives completion:^(TVLiveSource * _Nullable chosenSource) {
+                NSString *finalLive = (chosenSource.url.length > 0) ? chosenSource.url : liveURL;
+                if (chosenSource) {
+                    // 同步保存该直播源自带的节目单地址（无 epg 则清除旧关联）
+                    [self.config saveLiveEPGURL:chosenSource.epg ?: @""];
+                }
+                [self validateAndSaveLiveURL:finalLive];
             }];
         } else {
-            // 不包含直播数据：提示用户，并不从该地址保存直播数据源；仅保存用户手动填写的专属直播数据源
+            // 不包含直播数据：提示用户，并不从该地址保存直播数据源；仅处理用户手动填写的专属直播数据源
             [self showInfoAlertWithMessage:@"该点播数据源地址不包含直播数据，未从该地址保存直播数据源。"];
-            [self.config saveLiveConfigURLs:(liveURL.length > 0 ? @[liveURL] : @[])];
-            [self loadConfigURLRows];
-            [self reloadConfig];
+            [self validateAndSaveLiveURL:liveURL];
         }
+    }];
+}
+
+// 设置页验证进度显示
+- (void)setSettingsProgress:(NSString *)text {
+    self.settingsProgressLabel.stringValue = text ?: @"";
+}
+
+// 在指定结果标签上显示验证进行中状态（橙色）
+- (void)showValidationProgress:(NSString *)text forLabel:(NSTextField *)label {
+    label.stringValue = text ?: @"";
+    label.textColor = [NSColor systemOrangeColor];
+}
+
+// 在指定结果标签上显示验证通过状态（绿色）
+- (void)showValidationSuccess:(NSString *)text forLabel:(NSTextField *)label {
+    label.stringValue = text ?: @"";
+    label.textColor = [NSColor systemGreenColor];
+}
+
+// 在指定结果标签上显示验证失败状态（红色）
+- (void)showValidationFailure:(NSString *)text forLabel:(NSTextField *)label {
+    label.stringValue = text ?: @"";
+    label.textColor = [NSColor systemRedColor];
+}
+
+// 处理直播数据源：为空则清空并完成保存，否则单独详细验证后保存
+- (void)validateAndSaveLiveURL:(NSString *)liveURL {
+    NSString *trimmed = [liveURL stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length == 0) {
+        [self.config saveLiveConfigURLs:@[]];
+        [self loadConfigURLRows];
+        [self reloadConfig];
+        [self setSettingsProgress:@"点播数据源验证通过，已保存。"];
+        return;
+    }
+    [self validateLiveURLAndSave:trimmed];
+}
+
+// 直播数据源单独详细验证并保存
+- (void)validateLiveURLAndSave:(NSString *)liveURL {
+    [self.config validateLiveConfigURL:liveURL progress:^(NSString *step) {
+        [self setSettingsProgress:step];
+        [self showValidationProgress:step forLabel:self.liveValidationResultLabel];
+    } completion:^(NSError * _Nullable error) {
+        if (error) {
+            [self setSettingsProgress:@""];
+            [self showValidationFailure:error.localizedDescription forLabel:self.liveValidationResultLabel];
+            [self showErrorAlertWithMessage:error.localizedDescription];
+            return;
+        }
+        [self showValidationSuccess:@"✓ 直播数据源验证通过。" forLabel:self.liveValidationResultLabel];
+        [self.config saveLiveConfigURLs:@[liveURL]];
+        [self loadConfigURLRows];
+        [self reloadConfig];
+        [self setSettingsProgress:@"直播数据源验证通过，已保存。"];
+    }];
+}
+
+// 显性验证点播数据源（仅验证，不保存），逐步显示详细验证过程
+- (void)validateVODURLAction:(id)sender {
+    [self.view.window makeFirstResponder:nil];
+    [self setSettingsProgress:@""];
+    [self showValidationProgress:@"" forLabel:self.vodValidationResultLabel];
+
+    NSString *vodURL = [self.vodConfigURLField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (vodURL.length == 0) {
+        [self showValidationFailure:@"✗ 请先填写点播数据源 URL。" forLabel:self.vodValidationResultLabel];
+        [self showErrorAlertWithMessage:@"请先填写点播数据源 URL。"];
+        return;
+    }
+
+    [self.config validateVODConfigURL:vodURL progress:^(NSString *step) {
+        [self setSettingsProgress:step];
+        [self showValidationProgress:step forLabel:self.vodValidationResultLabel];
+    } completion:^(NSArray<TVLiveSource *> * _Nullable detectedLives, NSError * _Nullable error) {
+        if (error) {
+            [self setSettingsProgress:@""];
+            [self showValidationFailure:[NSString stringWithFormat:@"✗ 验证失败：%@", error.localizedDescription] forLabel:self.vodValidationResultLabel];
+            [self showErrorAlertWithMessage:error.localizedDescription];
+            return;
+        }
+        if (detectedLives.count > 0) {
+            [self showValidationSuccess:[NSString stringWithFormat:@"✓ 点播数据源验证通过，检测到 %ld 个直播源。", (long)detectedLives.count] forLabel:self.vodValidationResultLabel];
+        } else {
+            [self showValidationSuccess:@"✓ 点播数据源验证通过（未包含直播数据）。" forLabel:self.vodValidationResultLabel];
+        }
+    }];
+}
+
+// 显性验证直播数据源（仅验证，不保存），逐步显示详细验证过程
+- (void)validateLiveURLAction:(id)sender {
+    [self.view.window makeFirstResponder:nil];
+    [self setSettingsProgress:@""];
+    [self showValidationProgress:@"" forLabel:self.liveValidationResultLabel];
+
+    NSString *liveURL = [self.liveConfigURLField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (liveURL.length == 0) {
+        [self showValidationFailure:@"✗ 请先填写直播数据源 URL。" forLabel:self.liveValidationResultLabel];
+        [self showErrorAlertWithMessage:@"请先填写直播数据源 URL。"];
+        return;
+    }
+
+    [self.config validateLiveConfigURL:liveURL progress:^(NSString *step) {
+        [self setSettingsProgress:step];
+        [self showValidationProgress:step forLabel:self.liveValidationResultLabel];
+    } completion:^(NSError * _Nullable error) {
+        if (error) {
+            [self setSettingsProgress:@""];
+            [self showValidationFailure:[NSString stringWithFormat:@"✗ 验证失败：%@", error.localizedDescription] forLabel:self.liveValidationResultLabel];
+            [self showErrorAlertWithMessage:error.localizedDescription];
+            return;
+        }
+        [self showValidationSuccess:@"✓ 直播数据源验证通过。" forLabel:self.liveValidationResultLabel];
     }];
 }
 
@@ -2710,7 +3354,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 }
 
 // 该配置包含直播数据源时，弹出列表供用户选择是否保存其中一个
-- (void)presentLiveSourcePicker:(NSArray<TVLiveSource *> *)lives completion:(void (^)(NSString * _Nullable chosenURL))completion {
+- (void)presentLiveSourcePicker:(NSArray<TVLiveSource *> *)lives completion:(void (^)(TVLiveSource * _Nullable chosenSource))completion {
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"该配置包含直播数据源";
     alert.informativeText = @"请选择要保存到直播数据源的地址（选择「不选择」则忽略）：";
@@ -2721,15 +3365,29 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     popup.pullsDown = NO;
     for (TVLiveSource *source in lives) {
         NSString *name = source.name.length > 0 ? source.name : @"未命名直播源";
-        [popup addItemWithTitle:[NSString stringWithFormat:@"%@（%@）", name, (source.url ?: @"")]];
-        [popup.lastItem setRepresentedObject:source.url];
+        NSString *suffix = (source.epg.length > 0) ? @" · 含节目单" : @"";
+        [popup addItemWithTitle:[NSString stringWithFormat:@"%@（%@）%@", name, (source.url ?: @""), suffix]];
+        [popup.lastItem setRepresentedObject:source];
+    }
+
+    // 显示时选中现在已经选择的直播源
+    NSString *currentLiveURL = [self.config liveConfigURLs].firstObject;
+    if (currentLiveURL.length > 0) {
+        for (NSInteger i = 0; i < popup.numberOfItems; i++) {
+            NSMenuItem *item = [popup itemAtIndex:i];
+            TVLiveSource *source = (TVLiveSource *)item.representedObject;
+            if ([source.url isEqualToString:currentLiveURL]) {
+                [popup selectItemAtIndex:i];
+                break;
+            }
+        }
     }
     alert.accessoryView = popup;
 
     void (^handleResponse)(NSModalResponse) = ^(NSModalResponse response) {
-        NSString *chosen = nil;
+        TVLiveSource *chosen = nil;
         if (response == NSAlertFirstButtonReturn) {
-            chosen = (NSString *)popup.selectedItem.representedObject;
+            chosen = (TVLiveSource *)popup.selectedItem.representedObject;
         }
         if (completion) completion(chosen);
     };
@@ -2868,6 +3526,265 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     [self.historyTable reloadData];
 }
 
+#pragma mark - 收藏夹
+
+- (TVFavoriteItem *)favoriteItemForVideo:(TVVideo *)video site:(TVSite *)site {
+    TVFavoriteItem *item = [[TVFavoriteItem alloc] init];
+    item.isLive = NO;
+    item.title = video.name ?: @"";
+
+    NSArray<TVPlaySource *> *sources = [video playSources];
+    NSString *sourceName = @"";
+    NSString *episodeName = @"";
+    if (sources.count > 0) {
+        sourceName = sources[0].name ?: @"";
+        if (sources[0].episodes.count > 0) {
+            episodeName = sources[0].episodes[0].name ?: @"";
+        }
+    }
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    if (video.typeName.length > 0) [parts addObject:video.typeName];
+    if (sourceName.length > 0) [parts addObject:sourceName];
+    if (episodeName.length > 0) [parts addObject:episodeName];
+    item.subtitle = [parts componentsJoinedByString:@" · "];
+    item.posterURL = video.vodPic ?: @"";
+    item.payload = @{@"vodId": @(video.vodId),
+                     @"siteKey": site.key ?: @"",
+                     @"name": video.name ?: @"",
+                     @"typeName": video.typeName ?: @"",
+                     @"vodPic": video.vodPic ?: @""};
+    return item;
+}
+
+- (TVFavoriteItem *)favoriteItemForLiveChannel:(TVLiveChannel *)channel {
+    TVFavoriteItem *item = [[TVFavoriteItem alloc] init];
+    item.isLive = YES;
+    item.title = channel.name ?: @"";
+    item.subtitle = channel.group.length > 0 ? [NSString stringWithFormat:@"分组：%@", channel.group] : @"";
+    item.posterURL = channel.logo ?: @"";
+
+    NSMutableArray *lines = [NSMutableArray array];
+    for (TVLiveLine *line in (channel.lines ?: @[])) {
+        [lines addObject:@{@"sourceName": line.sourceName ?: @"",
+                           @"name": line.name ?: @"",
+                           @"url": line.url ?: @""}];
+    }
+    item.payload = @{@"name": channel.name ?: @"",
+                     @"group": channel.group ?: @"",
+                     @"logo": channel.logo ?: @"",
+                     @"url": channel.url ?: @"",
+                     @"lines": lines};
+    return item;
+}
+
+- (NSInteger)favoriteIndexForVideo:(TVVideo *)video site:(TVSite *)site {
+    for (NSUInteger i = 0; i < self.favoritesItems.count; i++) {
+        TVFavoriteItem *item = self.favoritesItems[i];
+        if (!item.isLive &&
+            [item.payload[@"siteKey"] isEqualToString:site.key] &&
+            [item.payload[@"vodId"] integerValue] == video.vodId) {
+            return (NSInteger)i;
+        }
+    }
+    return NSNotFound;
+}
+
+- (NSInteger)favoriteIndexForLiveChannel:(TVLiveChannel *)channel {
+    for (NSUInteger i = 0; i < self.favoritesItems.count; i++) {
+        TVFavoriteItem *item = self.favoritesItems[i];
+        if (item.isLive && [item.title isEqualToString:channel.name]) {
+            return (NSInteger)i;
+        }
+    }
+    return NSNotFound;
+}
+
+- (BOOL)isVideoFavorited:(TVVideo *)video site:(TVSite *)site {
+    return [self favoriteIndexForVideo:video site:site] != NSNotFound;
+}
+
+- (void)toggleLiveChannelFavorite:(TVLiveChannel *)channel {
+    NSInteger index = [self favoriteIndexForLiveChannel:channel];
+    if (index == NSNotFound) {
+        [self.favoritesItems addObject:[self favoriteItemForLiveChannel:channel]];
+    } else {
+        [self.favoritesItems removeObjectAtIndex:(NSUInteger)index];
+    }
+    [self saveFavorites];
+    [self.favoritesTable reloadData];
+    [self.liveTable reloadData];
+}
+
+- (void)detailModalFavoriteAction:(id)sender {
+    TVVideo *video = self.detailModalVideo;
+    TVSite *site = self.detailModalSite;
+    if (!video || !site) return;
+
+    NSInteger index = [self favoriteIndexForVideo:video site:site];
+    if (index == NSNotFound) {
+        [self.favoritesItems addObject:[self favoriteItemForVideo:video site:site]];
+    } else {
+        [self.favoritesItems removeObjectAtIndex:(NSUInteger)index];
+    }
+    [self saveFavorites];
+    [self.favoritesTable reloadData];
+    [self updateDetailFavoriteButtonState];
+}
+
+- (void)updateDetailFavoriteButtonState {
+    TVVideo *video = self.detailModalVideo;
+    TVSite *site = self.detailModalSite;
+    BOOL favorited = (video && site) && [self isVideoFavorited:video site:site];
+    self.detailModalFavoriteButton.image = [NSImage imageWithSystemSymbolName:(favorited ? @"star.fill" : @"star")
+                                                    accessibilityDescription:nil];
+    self.detailModalFavoriteButton.title = favorited ? @"已收藏" : @"收藏";
+}
+
+- (void)loadFavorites {
+    [self.favoritesItems removeAllObjects];
+    NSArray *array = [[NSUserDefaults standardUserDefaults] arrayForKey:kTVBoxFavoritesKey];
+    if ([array isKindOfClass:[NSArray class]]) {
+        for (id obj in array) {
+            if ([obj isKindOfClass:[NSDictionary class]]) {
+                TVFavoriteItem *item = [TVFavoriteItem favoriteItemFromDictionary:(NSDictionary *)obj];
+                if (item) [self.favoritesItems addObject:item];
+            }
+        }
+    }
+    [self.favoritesTable reloadData];
+}
+
+- (void)saveFavorites {
+    NSMutableArray *array = [NSMutableArray array];
+    for (TVFavoriteItem *item in self.favoritesItems) {
+        [array addObject:[item toDictionary]];
+    }
+    [[NSUserDefaults standardUserDefaults] setObject:array forKey:kTVBoxFavoritesKey];
+}
+
+- (void)favoriteRowDoubleClicked:(id)sender {
+    NSInteger row = self.favoritesTable.clickedRow;
+    if (row < 0 || row >= (NSInteger)self.favoritesItems.count) return;
+    [self resumeFavoriteItem:self.favoritesItems[(NSUInteger)row]];
+}
+
+- (void)removeFavoriteAtIndex:(NSInteger)index {
+    if (index < 0 || index >= (NSInteger)self.favoritesItems.count) return;
+    [self.favoritesItems removeObjectAtIndex:(NSUInteger)index];
+    [self saveFavorites];
+    [self.favoritesTable reloadData];
+    [self.liveTable reloadData];
+}
+
+- (TVLiveChannel *)liveChannelFromPayload:(NSDictionary *)payload fallbackTitle:(NSString *)title {
+    TVLiveChannel *channel = [[TVLiveChannel alloc] init];
+    channel.name = payload[@"name"] ?: (title ?: @"");
+    channel.group = payload[@"group"] ?: @"";
+    channel.logo = payload[@"logo"] ?: @"";
+    channel.url = payload[@"url"] ?: @"";
+
+    NSMutableArray<TVLiveLine *> *lines = [NSMutableArray array];
+    for (id obj in payload[@"lines"]) {
+        if (![obj isKindOfClass:[NSDictionary class]]) continue;
+        NSDictionary *d = (NSDictionary *)obj;
+        TVLiveLine *line = [[TVLiveLine alloc] init];
+        line.sourceName = d[@"sourceName"] ?: @"";
+        line.name = d[@"name"] ?: @"";
+        line.url = d[@"url"] ?: @"";
+        [lines addObject:line];
+    }
+    channel.lines = lines;
+    return channel;
+}
+
+- (void)resumeFavoriteItem:(TVFavoriteItem *)item {
+    if (!item) return;
+
+    if (item.isLive) {
+        TVLiveChannel *channel = [self liveChannelFromPayload:item.payload fallbackTitle:item.title];
+        if (channel.name.length == 0) return;
+        [self presentPlayerWithTitle:channel.name block:^(PlayerViewController *player) {
+            [player playLiveChannel:channel];
+        }];
+        return;
+    }
+
+    // 点播：按站点与 vodId 重新获取播放信息后播放。
+    NSString *siteKey = item.payload[@"siteKey"];
+    NSInteger vodId = [item.payload[@"vodId"] integerValue];
+    if (siteKey.length == 0 || vodId == 0) return;
+
+    TVSite *site = nil;
+    for (TVSite *s in self.config.vodSites) {
+        if ([s.key isEqualToString:siteKey]) {
+            site = s;
+            break;
+        }
+    }
+    if (!site) {
+        [self setStatus:@"收藏的视频对应的数据源已不可用"];
+        return;
+    }
+
+    [self setStatus:@"正在获取播放信息…"];
+    NSURL *url = [self.config vodURLForSite:site params:@{@"ac": @"detail", @"ids": [NSString stringWithFormat:@"%ld", (long)vodId]}];
+    [self.config requestJSONFromURL:url completion:^(id _Nullable json, NSError * _Nullable error) {
+        if (error) {
+            [self setStatus:[NSString stringWithFormat:@"获取播放信息失败：%@", error.localizedDescription]];
+            return;
+        }
+        NSArray *list = ((NSDictionary *)json)[@"list"];
+        if (![list isKindOfClass:[NSArray class]] || list.count == 0) {
+            [self setStatus:@"未获取到播放信息"];
+            return;
+        }
+        [self setStatus:@""];
+        TVVideo *detail = [TVVideo videoFromDictionary:(NSDictionary *)list[0]];
+        [self presentPlayerWithTitle:detail.name block:^(PlayerViewController *player) {
+            [player resumeVideo:detail sourceIndex:0 episodeIndex:0 resumeTime:0];
+        }];
+    }];
+}
+
+#pragma mark - 收藏夹拖拽排序
+
+- (id<NSPasteboardWriting>)tableView:(NSTableView *)tableView pasteboardWriterForRow:(NSInteger)row {
+    if (tableView != self.favoritesTable) return nil;
+    NSPasteboardItem *pbItem = [[NSPasteboardItem alloc] init];
+    [pbItem setString:[NSString stringWithFormat:@"%ld", (long)row] forType:kTVBoxFavoriteDragType];
+    return pbItem;
+}
+
+- (NSDragOperation)tableView:(NSTableView *)tableView validateDrop:(id<NSDraggingInfo>)info proposedRow:(NSInteger)row proposedDropOperation:(NSTableViewDropOperation)dropOperation {
+    if (tableView != self.favoritesTable) return NSDragOperationNone;
+    if (dropOperation == NSTableViewDropOn) {
+        [tableView setDropRow:row dropOperation:NSTableViewDropAbove];
+    }
+    return NSDragOperationMove;
+}
+
+- (BOOL)tableView:(NSTableView *)tableView acceptDrop:(id<NSDraggingInfo>)info row:(NSInteger)row dropOperation:(NSTableViewDropOperation)dropOperation {
+    if (tableView != self.favoritesTable) return NO;
+    NSString *sourceString = [[info draggingPasteboard] stringForType:kTVBoxFavoriteDragType];
+    if (sourceString.length == 0) return NO;
+
+    NSInteger sourceRow = sourceString.integerValue;
+    if (sourceRow < 0 || sourceRow >= (NSInteger)self.favoritesItems.count) return NO;
+
+    TVFavoriteItem *item = self.favoritesItems[(NSUInteger)sourceRow];
+    [self.favoritesItems removeObjectAtIndex:(NSUInteger)sourceRow];
+
+    NSInteger destinationRow = row;
+    if (destinationRow > (NSInteger)self.favoritesItems.count) {
+        destinationRow = (NSInteger)self.favoritesItems.count;
+    }
+    [self.favoritesItems insertObject:item atIndex:(NSUInteger)destinationRow];
+
+    [self saveFavorites];
+    [self.favoritesTable reloadData];
+    return YES;
+}
+
 - (void)historyRowDoubleClicked:(id)sender {
     NSInteger row = self.historyTable.clickedRow;
     if (row < 0 || row >= (NSInteger)self.historyItems.count) return;
@@ -2930,24 +3847,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 }
 
 - (TVLiveChannel *)liveChannelFromHistoryItem:(TVHistoryItem *)item {
-    TVLiveChannel *channel = [[TVLiveChannel alloc] init];
-    channel.name = item.payload[@"name"] ?: (item.title ?: @"");
-    channel.group = item.payload[@"group"] ?: @"";
-    channel.logo = item.payload[@"logo"] ?: @"";
-    channel.url = item.payload[@"url"] ?: @"";
-
-    NSMutableArray<TVLiveLine *> *lines = [NSMutableArray array];
-    for (id obj in item.payload[@"lines"]) {
-        if (![obj isKindOfClass:[NSDictionary class]]) continue;
-        NSDictionary *d = (NSDictionary *)obj;
-        TVLiveLine *line = [[TVLiveLine alloc] init];
-        line.sourceName = d[@"sourceName"] ?: @"";
-        line.name = d[@"name"] ?: @"";
-        line.url = d[@"url"] ?: @"";
-        [lines addObject:line];
-    }
-    channel.lines = lines;
-    return channel;
+    return [self liveChannelFromPayload:item.payload fallbackTitle:item.title];
 }
 
 - (NSString *)formatPlaybackTime:(NSTimeInterval)seconds {
@@ -2974,10 +3874,42 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     if (tableView == self.liveTable) return (NSInteger)self.displayedLiveChannels.count;
     if (tableView == self.sourcesTable) return (NSInteger)self.sourceRows.count;
     if (tableView == self.historyTable) return (NSInteger)self.historyItems.count;
+    if (tableView == self.favoritesTable) return (NSInteger)self.favoritesItems.count;
+    if (tableView == self.programTable) return (NSInteger)self.programModalItems.count;
     return 0;
 }
 
 - (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
+    if (tableView == self.programTable) {
+        NSString *identifier = [@"Program-" stringByAppendingString:tableColumn.identifier];
+        NSTableCellView *cell = [tableView makeViewWithIdentifier:identifier owner:self];
+        if (!cell) {
+            cell = [[NSTableCellView alloc] init];
+            cell.identifier = identifier;
+            NSTextField *textField = [NSTextField labelWithString:@""];
+            textField.translatesAutoresizingMaskIntoConstraints = NO;
+            textField.lineBreakMode = NSLineBreakByTruncatingTail;
+            [cell addSubview:textField];
+            cell.textField = textField;
+            [NSLayoutConstraint activateConstraints:@[
+                [textField.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:4],
+                [textField.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-4],
+                [textField.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
+            ]];
+        }
+        if (row < (NSInteger)self.programModalItems.count) {
+            TVLiveProgram *program = self.programModalItems[row];
+            if ([tableColumn.identifier isEqualToString:@"time"]) {
+                NSString *start = program.startTime ?: @"";
+                NSString *end = program.endTime ?: @"";
+                cell.textField.stringValue = (start.length > 0) ? [NSString stringWithFormat:@"%@ - %@", start, end] : start;
+            } else {
+                cell.textField.stringValue = program.title ?: @"";
+            }
+        }
+        return cell;
+    }
+
     if (tableView == self.sidebar) {
         NSString *identifier = @"SidebarCell";
         NSTableCellView *cell = [tableView makeViewWithIdentifier:identifier owner:self];
@@ -3083,6 +4015,51 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
         return cell;
     }
 
+    if (tableView == self.favoritesTable) {
+        if ([tableColumn.identifier isEqualToString:@"name"]) {
+            TVFavoriteCellView *cell = [tableView makeViewWithIdentifier:@"favorite-name" owner:self];
+            if (!cell) {
+                cell = [[TVFavoriteCellView alloc] initWithFrame:NSMakeRect(0, 0, 300, 36)];
+                cell.identifier = @"favorite-name";
+            }
+            if (row < (NSInteger)self.favoritesItems.count) {
+                TVFavoriteItem *item = self.favoritesItems[row];
+                cell.nameLabel.stringValue = item.title ?: @"";
+                __weak typeof(self) weakSelf = self;
+                cell.onDelete = ^{
+                    [weakSelf removeFavoriteAtIndex:row];
+                };
+            }
+            return cell;
+        }
+
+        NSString *identifier = [@"Favorite-" stringByAppendingString:tableColumn.identifier];
+        NSTableCellView *cell = [tableView makeViewWithIdentifier:identifier owner:self];
+        if (!cell) {
+            cell = [[NSTableCellView alloc] init];
+            cell.identifier = identifier;
+            NSTextField *textField = [NSTextField labelWithString:@""];
+            textField.translatesAutoresizingMaskIntoConstraints = NO;
+            textField.lineBreakMode = NSLineBreakByTruncatingTail;
+            [cell addSubview:textField];
+            cell.textField = textField;
+            [NSLayoutConstraint activateConstraints:@[
+                [textField.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:4],
+                [textField.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-4],
+                [textField.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
+            ]];
+        }
+        if (row < (NSInteger)self.favoritesItems.count) {
+            TVFavoriteItem *item = self.favoritesItems[row];
+            if ([tableColumn.identifier isEqualToString:@"type"]) {
+                cell.textField.stringValue = item.isLive ? @"直播" : @"点播";
+            } else if ([tableColumn.identifier isEqualToString:@"detail"]) {
+                cell.textField.stringValue = item.subtitle ?: @"";
+            }
+        }
+        return cell;
+    }
+
     if (tableView == self.liveTable && [tableColumn.identifier isEqualToString:@"icon"]) {
         TVLiveIconCell *cell = [tableView makeViewWithIdentifier:@"icon" owner:self];
         if (!cell) {
@@ -3094,6 +4071,29 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
             cell.channelKey = channel.name;
             cell.iconView.image = TVLetterIcon(channel.name);
             [self loadLiveLogoForChannel:channel intoCell:cell];
+        }
+        return cell;
+    }
+
+    if (tableView == self.liveTable && [tableColumn.identifier isEqualToString:@"channel"]) {
+        TVChannelCellView *cell = [tableView makeViewWithIdentifier:@"channel" owner:self];
+        if (!cell) {
+            cell = [[TVChannelCellView alloc] initWithFrame:NSMakeRect(0, 0, 320, 32)];
+            cell.identifier = @"channel";
+        }
+        if (row < (NSInteger)self.displayedLiveChannels.count) {
+            TVLiveChannel *channel = self.displayedLiveChannels[row];
+            __weak typeof(self) weakSelf = self;
+            cell.nameLabel.stringValue = channel.name ?: @"";
+            cell.programLink.hidden = (channel.programs.count == 0);
+            [cell refreshHoverState];
+            cell.favorited = ([weakSelf favoriteIndexForLiveChannel:channel] != NSNotFound);
+            cell.onProgramClick = ^{
+                [weakSelf showProgramScheduleForChannel:channel];
+            };
+            cell.onFavoriteClick = ^{
+                [weakSelf toggleLiveChannelFavorite:channel];
+            };
         }
         return cell;
     }

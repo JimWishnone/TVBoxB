@@ -142,6 +142,9 @@ static BOOL MMBool(id value) {
 @implementation TVLiveLine
 @end
 
+@implementation TVLiveProgram
+@end
+
 @implementation TVLiveChannel
 
 - (NSString *)sourceNames {
@@ -193,6 +196,35 @@ static BOOL MMBool(id value) {
     item.playbackTime = [dict[@"playbackTime"] doubleValue];
     double dateValue = [dict[@"date"] doubleValue];
     item.date = dateValue > 0 ? [NSDate dateWithTimeIntervalSince1970:dateValue] : [NSDate date];
+    id payload = dict[@"payload"];
+    item.payload = [payload isKindOfClass:[NSDictionary class]] ? payload : @{};
+    return item;
+}
+
+@end
+
+@implementation TVFavoriteItem
+
+- (NSDictionary *)toDictionary {
+    NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+    dict[@"isLive"] = @(self.isLive);
+    dict[@"title"] = self.title ?: @"";
+    dict[@"subtitle"] = self.subtitle ?: @"";
+    dict[@"posterURL"] = self.posterURL ?: @"";
+    if (self.payload && [NSJSONSerialization isValidJSONObject:self.payload]) {
+        dict[@"payload"] = self.payload;
+    } else {
+        dict[@"payload"] = @{};
+    }
+    return dict;
+}
+
++ (instancetype)favoriteItemFromDictionary:(NSDictionary *)dict {
+    TVFavoriteItem *item = [[TVFavoriteItem alloc] init];
+    item.isLive = [dict[@"isLive"] boolValue];
+    item.title = MMString(dict[@"title"]);
+    item.subtitle = MMString(dict[@"subtitle"]);
+    item.posterURL = MMString(dict[@"posterURL"]);
     id payload = dict[@"payload"];
     item.payload = [payload isKindOfClass:[NSDictionary class]] ? payload : @{};
     return item;

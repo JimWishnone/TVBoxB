@@ -77,6 +77,13 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy) NSString *url;
 @end
 
+// 直播节目单条目（EPG）
+@interface TVLiveProgram : NSObject
+@property (nonatomic, copy) NSString *title;     // 节目名称
+@property (nonatomic, copy) NSString *startTime; // 开始时间（HH:mm）
+@property (nonatomic, copy) NSString *endTime;   // 结束时间（HH:mm）
+@end
+
 // 直播频道
 @interface TVLiveChannel : NSObject
 @property (nonatomic, copy) NSString *name;
@@ -87,6 +94,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong) NSArray<TVLiveLine *> *lines;
 // 该频道合并线路对应的数据源名称（去重后拼接，用于列表展示与排序）
 @property (nonatomic, readonly) NSString *sourceNames;
+// 该频道可用的节目单（nil 表示尚未检查，空数组表示无节目单）
+@property (nonatomic, strong) NSArray<TVLiveProgram *> *programs;
 @end
 
 // 解析接口
@@ -111,6 +120,18 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (NSDictionary *)toDictionary;
 + (nullable instancetype)historyItemFromDictionary:(NSDictionary *)dict;
+@end
+
+// 收藏条目（点播或直播），支持在收藏夹中拖动排序
+@interface TVFavoriteItem : NSObject
+@property (nonatomic, assign) BOOL isLive;      // YES 直播，NO 点播
+@property (nonatomic, copy) NSString *title;    // 名称（片名 / 频道名）
+@property (nonatomic, copy) NSString *subtitle; // 副标题（数据源 / 分组等）
+@property (nonatomic, copy) NSString *posterURL;// 海报 / 频道图标
+@property (nonatomic, strong) NSDictionary *payload; // 用于重新播放的完整数据
+
+- (NSDictionary *)toDictionary;
++ (nullable instancetype)favoriteItemFromDictionary:(NSDictionary *)dict;
 @end
 
 NS_ASSUME_NONNULL_END
