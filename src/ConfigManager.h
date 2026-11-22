@@ -71,6 +71,12 @@ typedef void (^TVValidateProgressBlock)(NSString * _Nullable stepMessage);
                         epgURL:(NSString *)epgURL
                     completion:(void (^)(NSArray<TVLiveProgram *> * _Nullable programs))completion;
 
+// 批量拉取多个频道的节目单（EPG）：优先一次性请求整份 XMLTV 节目单并按频道分发，否则回退逐频道请求（带本地缓存）；
+// 返回字典以请求时传入的频道名为键，完成回调始终在主线程执行
+- (void)fetchProgramsForChannels:(NSArray<NSString *> *)channelNames
+                          epgURL:(NSString *)epgURL
+                      completion:(void (^)(NSDictionary<NSString *, NSArray<TVLiveProgram *> *> * _Nonnull results))completion;
+
 @end
 
 NS_ASSUME_NONNULL_END

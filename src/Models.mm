@@ -1,23 +1,5 @@
 #import "Models.h"
 
-static NSString *MMString(id value) {
-    if ([value isKindOfClass:[NSString class]]) return value;
-    if ([value isKindOfClass:[NSNumber class]]) return [value stringValue];
-    return @"";
-}
-
-static NSInteger MMInteger(id value) {
-    if ([value isKindOfClass:[NSNumber class]]) return [value integerValue];
-    if ([value isKindOfClass:[NSString class]]) return [value integerValue];
-    return 0;
-}
-
-static BOOL MMBool(id value) {
-    if ([value isKindOfClass:[NSNumber class]]) return [value boolValue];
-    if ([value isKindOfClass:[NSString class]]) return [value boolValue];
-    return NO;
-}
-
 @implementation TVCategory
 
 + (instancetype)categoryFromDictionary:(NSDictionary *)dict {

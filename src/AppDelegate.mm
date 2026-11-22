@@ -75,6 +75,8 @@ static NSString * const kTVBoxMainWindowFrameKey = @"TVBoxMainWindowFrame";
                                                    styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
                                                      backing:NSBackingStoreBuffered
                                                        defer:NO];
+    // 关闭窗口时不自动释放，改由 AppDelegate 的强引用持有，避免关闭后 self.window 成为悬空指针
+    window.releasedWhenClosed = NO;
     window.title = @"TVBoxB";
 
     // 主窗体可自由放大缩小：不设最大尺寸，最小尺寸放宽，方便用户按需缩小

@@ -1,5 +1,36 @@
 #import <Foundation/Foundation.h>
 
+// 字符串解析工具函数：全局仅保留一份，供模型解析与配置解析公共使用。
+static inline NSString * _Nonnull MMString(id _Nullable value) {
+    if ([value isKindOfClass:[NSString class]]) return value;
+    if ([value isKindOfClass:[NSNumber class]]) return [value stringValue];
+    return @"";
+}
+
+static inline NSInteger MMInteger(id _Nullable value) {
+    if ([value isKindOfClass:[NSNumber class]]) return [value integerValue];
+    if ([value isKindOfClass:[NSString class]]) return [value integerValue];
+    return 0;
+}
+
+static inline BOOL MMBool(id _Nullable value) {
+    if ([value isKindOfClass:[NSNumber class]]) return [value boolValue];
+    if ([value isKindOfClass:[NSString class]]) return [value boolValue];
+    return NO;
+}
+
+// 对字符串做 FNV-1a 64 位哈希，用于生成缓存文件名（避免 URL 等长字符串中的特殊字符）。
+static inline NSString * _Nonnull TVBoxHexHash(NSString * _Nonnull input) {
+    unsigned long long hash = 1469598103934665603ULL;
+    NSData *data = [input dataUsingEncoding:NSUTF8StringEncoding];
+    const unsigned char *bytes = (const unsigned char *)data.bytes;
+    for (NSUInteger i = 0; i < data.length; i++) {
+        hash ^= bytes[i];
+        hash *= 1099511628211ULL;
+    }
+    return [NSString stringWithFormat:@"%016llx", hash];
+}
+
 NS_ASSUME_NONNULL_BEGIN
 
 @class TVSite;
@@ -39,6 +70,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy) NSString *vodContent;
 @property (nonatomic, copy) NSString *vodPlayFrom;
 @property (nonatomic, copy) NSString *vodPlayUrl;
+// 跳过片头 / 片尾时间（单位：秒，0 表示不跳过），作用于该影片所有内容
+@property (nonatomic, assign) NSTimeInterval skipIntroSeconds;
+@property (nonatomic, assign) NSTimeInterval skipOutroSeconds;
 // 该视频所属的数据源（搜索跨站点时记录来源）
 @property (nonatomic, strong, nullable) TVSite *sourceSite;
 

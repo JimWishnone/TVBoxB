@@ -1,26 +1,24 @@
 #import "ConfigManager.h"
+#import <CoreFoundation/CFStringEncodingExt.h>
 
 static NSString * const kUserConfigURLsKey = @"TVBoxUserConfigURLs";
 static NSString * const kUserLiveConfigURLsKey = @"TVBoxUserLiveConfigURLs";
 static NSString * const kUserLiveEPGURLKey = @"TVBoxUserLiveEPGURL";
+
+// 网络请求最大重试次数：首包失败后最多再尝试 2 次（共 3 次请求）
+static const NSInteger TVBoxMaxNetworkRetries = 2;
+
+// 归一化地址作为环检测的访问键：去除首尾空白并统一小写，识别同一地址的不同写法。
+static NSString *TVBoxVisitedKey(NSString *urlString) {
+    NSString *trimmed = [urlString stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return [trimmed lowercaseString];
+}
 
 @interface ConfigManager ()
 @property (nonatomic, strong) NSArray<TVSite *> *vodSites;
 @property (nonatomic, strong) NSArray<TVLiveSource *> *liveSources;
 @property (nonatomic, strong) NSArray<TVParse *> *parses;
 @end
-
-static NSString *MMString(id value) {
-    if ([value isKindOfClass:[NSString class]]) return value;
-    if ([value isKindOfClass:[NSNumber class]]) return [value stringValue];
-    return @"";
-}
-
-static NSInteger MMInteger(id value) {
-    if ([value isKindOfClass:[NSNumber class]]) return [value integerValue];
-    if ([value isKindOfClass:[NSString class]]) return [value integerValue];
-    return 0;
-}
 
 @implementation ConfigManager
 
@@ -46,7 +44,7 @@ static NSInteger MMInteger(id value) {
             if (completion) completion(nil);
             return;
         }
-        [self loadLiveConfigFromURLs:liveURLs index:0 completion:^(NSError * _Nullable liveError) {
+        [self loadLiveConfigFromURLs:liveURLs index:0 visited:[NSMutableSet set] completion:^(NSError * _Nullable liveError) {
             // 直播源加载失败不影响点播（此时无点播源），仍以 nil 结束加载流程
             if (completion) completion(nil);
         }];
@@ -54,14 +52,14 @@ static NSInteger MMInteger(id value) {
     }
 
     // 先加载主数据源（点播站点 + 作为回退的直播源 + 解析接口）
-    [self loadConfigFromURLs:vodURLs index:0 completion:^(NSError * _Nullable vodError) {
+    [self loadConfigFromURLs:vodURLs index:0 visited:[NSMutableSet set] completion:^(NSError * _Nullable vodError) {
         if (liveURLs.count == 0) {
             // 未设置专属直播数据源，沿用主数据源中的直播源
             if (completion) completion(vodError);
             return;
         }
         // 设置了专属直播数据源时，用它覆盖主数据源中的直播源
-        [self loadLiveConfigFromURLs:liveURLs index:0 completion:^(NSError * _Nullable liveError) {
+        [self loadLiveConfigFromURLs:liveURLs index:0 visited:[NSMutableSet set] completion:^(NSError * _Nullable liveError) {
             // 直播源加载失败不影响点播，此时仍保留主数据源中的直播源作为回退
             if (completion) completion(nil);
         }];
@@ -160,7 +158,7 @@ static NSInteger MMInteger(id value) {
     collector[@"parses"] = [NSMutableArray array];
 
     if (progressBlock) progressBlock(@"正在访问点播数据源…");
-    [self collectConfigFromURL:url depth:0 collector:collector completion:^(NSError * _Nullable error) {
+    [self collectConfigFromURL:url depth:0 visited:[NSMutableSet set] collector:collector completion:^(NSError * _Nullable error) {
         if (error) {
             if (completion) completion(nil, error);
             return;
@@ -265,7 +263,7 @@ static NSInteger MMInteger(id value) {
 }
 
 // 加载专属直播数据源：既可以是 JSON 配置（含 lives / urls），也可以是 m3u / DIYP 文本列表
-- (void)loadLiveConfigFromURLs:(NSArray<NSString *> *)urls index:(NSInteger)index completion:(void (^)(NSError * _Nullable))completion {
+- (void)loadLiveConfigFromURLs:(NSArray<NSString *> *)urls index:(NSInteger)index visited:(NSMutableSet<NSString *> *)visited completion:(void (^)(NSError * _Nullable))completion {
     if (index >= (NSInteger)urls.count) {
         if (completion) {
             completion([NSError errorWithDomain:@"TVBox"
@@ -275,15 +273,22 @@ static NSInteger MMInteger(id value) {
         return;
     }
     NSString *urlString = urls[index];
+    NSString *key = TVBoxVisitedKey(urlString);
+    if ([visited containsObject:key]) {
+        // 该地址已访问过，跳过以避免多仓循环引用导致无限递归
+        [self loadLiveConfigFromURLs:urls index:index + 1 visited:visited completion:completion];
+        return;
+    }
+    [visited addObject:key];
     NSURL *url = [NSURL URLWithString:urlString];
     if (!url) {
-        [self loadLiveConfigFromURLs:urls index:index + 1 completion:completion];
+        [self loadLiveConfigFromURLs:urls index:index + 1 visited:visited completion:completion];
         return;
     }
 
     [self fetchStringFromURL:url completion:^(NSString * _Nullable text, NSError * _Nullable error) {
         if (error || text.length == 0) {
-            [self loadLiveConfigFromURLs:urls index:index + 1 completion:completion];
+            [self loadLiveConfigFromURLs:urls index:index + 1 visited:visited completion:completion];
             return;
         }
 
@@ -312,7 +317,7 @@ static NSInteger MMInteger(id value) {
                     if (trimmedU.length > 0) [flat addObject:trimmedU];
                 }
                 if (flat.count > 0) {
-                    [self loadLiveConfigFromURLs:flat index:0 completion:completion];
+                    [self loadLiveConfigFromURLs:flat index:0 visited:visited completion:completion];
                     return;
                 }
             }
@@ -347,7 +352,7 @@ static NSInteger MMInteger(id value) {
     }];
 }
 
-- (void)loadConfigFromURLs:(NSArray<NSString *> *)urls index:(NSInteger)index completion:(void (^)(NSError * _Nullable))completion {
+- (void)loadConfigFromURLs:(NSArray<NSString *> *)urls index:(NSInteger)index visited:(NSMutableSet<NSString *> *)visited completion:(void (^)(NSError * _Nullable))completion {
     if (index >= (NSInteger)urls.count) {
         if (completion) {
             completion([NSError errorWithDomain:@"TVBox"
@@ -365,9 +370,9 @@ static NSInteger MMInteger(id value) {
     collector[@"lives"] = [NSMutableArray array];
     collector[@"parses"] = [NSMutableArray array];
 
-    [self collectConfigFromURL:url depth:0 collector:collector completion:^(NSError * _Nullable error) {
+    [self collectConfigFromURL:url depth:0 visited:visited collector:collector completion:^(NSError * _Nullable error) {
         if (error) {
-            [self loadConfigFromURLs:urls index:index + 1 completion:completion];
+            [self loadConfigFromURLs:urls index:index + 1 visited:visited completion:completion];
             return;
         }
         [self parseConfig:collector];
@@ -375,7 +380,7 @@ static NSInteger MMInteger(id value) {
     }];
 }
 
-- (void)collectConfigFromURL:(NSURL *)url depth:(NSInteger)depth collector:(NSMutableDictionary *)collector completion:(void (^)(NSError * _Nullable))completion {
+- (void)collectConfigFromURL:(NSURL *)url depth:(NSInteger)depth visited:(NSMutableSet<NSString *> *)visited collector:(NSMutableDictionary *)collector completion:(void (^)(NSError * _Nullable))completion {
     if (depth > 4) {
         if (completion) {
             completion([NSError errorWithDomain:@"TVBox"
@@ -384,6 +389,14 @@ static NSInteger MMInteger(id value) {
         }
         return;
     }
+
+    // 多仓循环引用检测：同一地址只访问一次，已访问则跳过该分支，避免无限递归
+    NSString *key = TVBoxVisitedKey(url.absoluteString);
+    if ([visited containsObject:key]) {
+        if (completion) completion(nil);
+        return;
+    }
+    [visited addObject:key];
 
     [self requestJSONFromURL:url completion:^(id _Nullable json, NSError * _Nullable error) {
         if (error) {
@@ -394,7 +407,7 @@ static NSInteger MMInteger(id value) {
         NSArray *subURLs = [self arrayValue:dict[@"urls"]];
         if (subURLs.count > 0) {
             // 多仓格式：逐个加载子配置并合并
-            [self collectSubConfigURLs:subURLs depth:depth + 1 collector:collector completion:completion];
+            [self collectSubConfigURLs:subURLs depth:depth + 1 visited:visited collector:collector completion:completion];
             return;
         }
 
@@ -405,7 +418,7 @@ static NSInteger MMInteger(id value) {
     }];
 }
 
-- (void)collectSubConfigURLs:(NSArray *)urls depth:(NSInteger)depth collector:(NSMutableDictionary *)collector completion:(void (^)(NSError * _Nullable))completion {
+- (void)collectSubConfigURLs:(NSArray *)urls depth:(NSInteger)depth visited:(NSMutableSet<NSString *> *)visited collector:(NSMutableDictionary *)collector completion:(void (^)(NSError * _Nullable))completion {
     __block NSInteger remaining = (NSInteger)urls.count;
     __block NSError *firstError = nil;
 
@@ -443,7 +456,7 @@ static NSInteger MMInteger(id value) {
             continue;
         }
 
-        [self collectConfigFromURL:subURL depth:depth collector:collector completion:^(NSError * _Nullable err) {
+        [self collectConfigFromURL:subURL depth:depth visited:visited collector:collector completion:^(NSError * _Nullable err) {
             if (err && !firstError) firstError = err;
             remaining--;
             finishIfNeeded();
@@ -521,40 +534,16 @@ static NSInteger MMInteger(id value) {
 }
 
 - (void)requestJSONFromURL:(NSURL *)url retryRemaining:(NSInteger)retryRemaining completion:(void (^)(id _Nullable, NSError * _Nullable))completion {
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    request.timeoutInterval = 12.0;
-    [request setValue:@"okhttp/3.15" forHTTPHeaderField:@"User-Agent"];
-
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
-        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+    [self requestDataFromURL:url retryRemaining:TVBoxMaxNetworkRetries completion:^(NSData * _Nullable data, NSError * _Nullable error) {
         if (error) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, error);
-            });
-            return;
-        }
-
-        // 检查 HTTP 状态码：站点在临时失效/被拦截时可能返回 200 以外的状态码
-        NSInteger statusCode = 200;
-        if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-            statusCode = ((NSHTTPURLResponse *)response).statusCode;
-        }
-        if (statusCode < 200 || statusCode >= 300) {
-            NSError *statusError = [NSError errorWithDomain:@"TVBox"
-                                                       code:statusCode
-                                                   userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"服务器返回状态码 %ld", (long)statusCode]}];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, statusError);
-            });
+            if (completion) completion(nil, error);
             return;
         }
 
         NSError *jsonError = nil;
         id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
         if (jsonError == nil && [json isKindOfClass:[NSDictionary class]]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(json, nil);
-            });
+            if (completion) completion(json, nil);
             return;
         }
 
@@ -580,35 +569,111 @@ static NSInteger MMInteger(id value) {
         NSError *resultError = [NSError errorWithDomain:@"TVBox"
                                                    code:-1
                                                userInfo:@{NSLocalizedDescriptionKey: message}];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (completion) completion(nil, resultError);
-        });
+        if (completion) completion(nil, resultError);
     }];
-    [task resume];
+}
+
+// 统一网络会话：配置首包/整体超时、单域名并发上限、响应缓存与弱网等待。
+// 弱网下自动续传并优先命中本地缓存，避免请求直接失败或长时间无响应。
+- (NSURLSession *)tvSession {
+    static NSURLSession *session = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+        cfg.timeoutIntervalForRequest = 15.0;    // 首包超时，弱网下更宽容
+        cfg.timeoutIntervalForResource = 30.0;   // 整体资源超时
+        cfg.HTTPMaximumConnectionsPerHost = 6;   // 限制单域名并发，避免打爆慢网
+        cfg.requestCachePolicy = NSURLRequestReturnCacheDataElseLoad; // 优先命中响应缓存
+        cfg.URLCache = [[NSURLCache alloc] initWithMemoryCapacity:8 * 1024 * 1024
+                                                     diskCapacity:64 * 1024 * 1024
+                                                         diskPath:@"tvbox-urlcache"];
+        cfg.waitsForConnectivity = YES;          // 无网时挂起等待恢复，而非立即超时
+        session = [NSURLSession sessionWithConfiguration:cfg];
+    });
+    return session;
+}
+
+// 底层统一请求：设置超时与 User-Agent，校验 HTTP 状态码，并在网络错误 / 状态码异常时自动重试。
+// 点播接口、直播源、EPG 均复用此实现；回调始终在主线程执行。
+- (void)requestDataFromURL:(NSURL *)url retryRemaining:(NSInteger)retryRemaining completion:(void (^)(NSData * _Nullable, NSError * _Nullable))completion {
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+    request.timeoutInterval = 15.0;
+    [request setValue:@"okhttp/3.15" forHTTPHeaderField:@"User-Agent"];
+
+    [[[self tvSession] dataTaskWithRequest:request
+        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+            if (error) {
+                [self retryDataRequestWithError:error url:url retryRemaining:retryRemaining completion:completion];
+                return;
+            }
+
+            NSInteger statusCode = 200;
+            if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                statusCode = ((NSHTTPURLResponse *)response).statusCode;
+            }
+            if (statusCode < 200 || statusCode >= 300) {
+                NSError *statusError = [NSError errorWithDomain:@"TVBox"
+                                                           code:statusCode
+                                                       userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"服务器返回状态码 %ld", (long)statusCode]}];
+                [self retryDataRequestWithError:statusError url:url retryRemaining:retryRemaining completion:completion];
+                return;
+            }
+
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(data, nil);
+            });
+        }] resume];
+}
+
+// 网络错误 / 状态码异常时：4xx 客户端错误直接失败；其余可恢复错误按指数退避 + 抖动延时重试。
+- (void)retryDataRequestWithError:(NSError *)error url:(NSURL *)url retryRemaining:(NSInteger)retryRemaining completion:(void (^)(NSData * _Nullable, NSError * _Nullable))completion {
+    // 4xx 为客户端错误（地址无效、无权限等），重试无法修复，快速失败避免无谓等待
+    BOOL isClientError = (error.code >= 400 && error.code < 500);
+    if (isClientError || retryRemaining <= 0) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(nil, error);
+        });
+        return;
+    }
+
+    NSInteger retryIndex = TVBoxMaxNetworkRetries - retryRemaining;
+    NSTimeInterval delay = [self backoffDelayForRetryIndex:retryIndex];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self requestDataFromURL:url retryRemaining:retryRemaining - 1 completion:completion];
+    });
+}
+
+// 指数退避 + 抖动：基础延时 0.5s，随重试次数翻倍，并叠加 ±20% 随机抖动避免集中重试。
+- (NSTimeInterval)backoffDelayForRetryIndex:(NSInteger)retryIndex {
+    NSTimeInterval base = 0.5;
+    NSTimeInterval exponential = base;
+    for (NSInteger i = 0; i < retryIndex; i++) {
+        exponential *= 2.0;
+    }
+    double jitterRatio = ((double)arc4random_uniform(100) / 100.0) * 0.4 - 0.2;
+    return MAX(0.1, exponential * (1.0 + jitterRatio));
 }
 
 - (void)fetchStringFromURL:(NSURL *)url completion:(void (^)(NSString * _Nullable, NSError * _Nullable))completion {
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    request.timeoutInterval = 12.0;
-    [request setValue:@"okhttp/3.15" forHTTPHeaderField:@"User-Agent"];
-
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
-        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+    [self requestDataFromURL:url retryRemaining:TVBoxMaxNetworkRetries completion:^(NSData * _Nullable data, NSError * _Nullable error) {
         if (error) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, error);
-            });
+            if (completion) completion(nil, error);
             return;
         }
-        NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        if (!text) {
-            text = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
-        }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (completion) completion(text, nil);
-        });
+        if (completion) completion([self stringFromResponseData:data], nil);
     }];
-    [task resume];
+}
+
+// 响应数据转字符串：依次尝试 UTF-8、GB18030（中文直播源常见）、Latin-1，兼容不同编码。
+- (NSString *)stringFromResponseData:(NSData *)data {
+    if (data.length == 0) return @"";
+    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (text) return text;
+    NSStringEncoding gb18030 = CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingGB_18030_2000);
+    text = [[NSString alloc] initWithData:data encoding:gb18030];
+    if (text) return text;
+    text = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
+    return text ?: @"";
 }
 
 - (NSURL *)vodURLForSite:(TVSite *)site params:(NSDictionary<NSString *, NSString *> *)params {
@@ -722,6 +787,42 @@ static NSInteger MMInteger(id value) {
 
 #pragma mark - 节目单（EPG）
 
+// EPG 磁盘缓存目录：~/Library/Caches/TVBox/EPGCache
+static NSString *TVBoxEPGCacheDirectory(void) {
+    static NSString *dir = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *caches = [NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) firstObject];
+        dir = [[caches stringByAppendingPathComponent:@"TVBox"] stringByAppendingPathComponent:@"EPGCache"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    });
+    return dir;
+}
+
+// 节目单缓存有效期：2 小时，过期后重新拉取
+static const NSTimeInterval kTVBoxEPGCacheTTL = 2 * 60 * 60;
+
+static NSString *TVBoxEPGCachePath(NSString *epgURL, NSString *channelKey) {
+    NSString *hashKey = [NSString stringWithFormat:@"%@|%@", epgURL, channelKey];
+    return [TVBoxEPGCacheDirectory() stringByAppendingPathComponent:[TVBoxHexHash(hashKey) stringByAppendingString:@".txt"]];
+}
+
+// 读取未过期的缓存文本，未命中或已过期返回 nil
+static NSString *TVBoxEPGCachedText(NSString *epgURL, NSString *channelKey) {
+    NSString *path = TVBoxEPGCachePath(epgURL, channelKey);
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+    NSDate *modified = attrs[NSFileModificationDate];
+    if (modified && [[NSDate date] timeIntervalSinceDate:modified] < kTVBoxEPGCacheTTL) {
+        return [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    }
+    return nil;
+}
+
+static void TVBoxEPGStoreText(NSString *text, NSString *epgURL, NSString *channelKey) {
+    if (text.length == 0) return;
+    [text writeToFile:TVBoxEPGCachePath(epgURL, channelKey) atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
+
 - (void)fetchProgramsForChannel:(NSString *)channelName
                         epgURL:(NSString *)epgURL
                     completion:(void (^)(NSArray<TVLiveProgram *> * _Nullable programs))completion {
@@ -729,6 +830,14 @@ static NSInteger MMInteger(id value) {
         if (completion) completion(@[]);
         return;
     }
+
+    // 命中未过期的本地缓存时直接解析返回，避免重复拉取
+    NSString *cachedText = TVBoxEPGCachedText(epgURL, channelName);
+    if (cachedText) {
+        if (completion) completion([self parseProgramsFromText:cachedText]);
+        return;
+    }
+
     NSURL *url = [self epgQueryURLForBase:epgURL channelName:channelName];
     if (!url) {
         if (completion) completion(@[]);
@@ -739,6 +848,7 @@ static NSInteger MMInteger(id value) {
             if (completion) completion(@[]);
             return;
         }
+        TVBoxEPGStoreText(text, epgURL, channelName);
         NSArray<TVLiveProgram *> *programs = [self parseProgramsFromText:text];
         if (programs.count > 0) {
             if (completion) completion(programs);
@@ -756,10 +866,155 @@ static NSInteger MMInteger(id value) {
             return;
         }
         [self fetchStringFromURL:retryURL completion:^(NSString * _Nullable retryText, NSError * _Nullable retryError) {
-            NSArray<TVLiveProgram *> *retryPrograms = (retryError || retryText.length == 0) ? @[] : [self parseProgramsFromText:retryText];
-            if (completion) completion(retryPrograms ?: @[]);
+            NSArray<TVLiveProgram *> *retryPrograms = @[];
+            if (!retryError && retryText.length > 0) {
+                TVBoxEPGStoreText(retryText, epgURL, normalized);
+                retryPrograms = [self parseProgramsFromText:retryText];
+            }
+            if (completion) completion(retryPrograms);
         }];
     }];
+}
+
+// 批量拉取多个频道的节目单：
+// 优先尝试一次性请求整份 XMLTV 节目单并按频道分发（大幅减少网络请求）；
+// 非 XMLTV（DIYP / 112114 等按频道返回 JSON）时回退到逐频道请求（带本地缓存）。
+// 返回字典以“请求时传入的频道名”为键。
+- (void)fetchProgramsForChannels:(NSArray<NSString *> *)channelNames
+                          epgURL:(NSString *)epgURL
+                      completion:(void (^)(NSDictionary<NSString *, NSArray<TVLiveProgram *> *> * _Nonnull results))completion {
+    if (channelNames.count == 0 || epgURL.length == 0) {
+        if (completion) completion(@{});
+        return;
+    }
+
+    // 模板地址（含 {name}/{channel}）无法整份拉取，直接走逐频道分支
+    if ([epgURL containsString:@"{name}"] || [epgURL containsString:@"{channel}"]) {
+        [self fetchProgramsForChannelsIndividually:channelNames epgURL:epgURL completion:completion];
+        return;
+    }
+
+    // 整份 XMLTV 节目单也做磁盘缓存，键为特殊标记
+    NSString *batchKey = @"__ALL__";
+    NSString *cachedBatch = TVBoxEPGCachedText(epgURL, batchKey);
+    if (cachedBatch) {
+        [self distributeProgramsByChannel:cachedBatch channelNames:channelNames completion:completion];
+        return;
+    }
+
+    NSURL *baseURL = [NSURL URLWithString:epgURL];
+    if (!baseURL) {
+        [self fetchProgramsForChannelsIndividually:channelNames epgURL:epgURL completion:completion];
+        return;
+    }
+    [self fetchStringFromURL:baseURL completion:^(NSString * _Nullable text, NSError * _Nullable error) {
+        NSString *trimmed = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!error && trimmed.length > 0 && [trimmed hasPrefix:@"<"]) {
+            // XMLTV 整份节目单：缓存并按频道分发
+            TVBoxEPGStoreText(trimmed, epgURL, batchKey);
+            [self distributeProgramsByChannel:trimmed channelNames:channelNames completion:completion];
+            return;
+        }
+        [self fetchProgramsForChannelsIndividually:channelNames epgURL:epgURL completion:completion];
+    }];
+}
+
+// 将整份 XMLTV 节目单按请求的频道名分发，返回以频道名为键的结果字典
+- (void)distributeProgramsByChannel:(NSString *)xml
+                       channelNames:(NSArray<NSString *> *)channelNames
+                         completion:(void (^)(NSDictionary<NSString *, NSArray<TVLiveProgram *> *> * _Nonnull results))completion {
+    NSDictionary<NSString *, NSArray<TVLiveProgram *> *> *byChannel = [self parseXMLTVProgramsByChannel:xml];
+    NSMutableDictionary<NSString *, NSArray<TVLiveProgram *> *> *results = [NSMutableDictionary dictionary];
+    for (NSString *name in channelNames) {
+        NSArray<TVLiveProgram *> *programs = byChannel[name];
+        if (!programs) programs = byChannel[[self normalizedEPGChannelName:name]];
+        results[name] = programs ?: @[];
+    }
+    if (completion) completion(results);
+}
+
+// 逐频道拉取（非 XMLTV 源的回退路径），带并发限制，结果以频道名为键
+- (void)fetchProgramsForChannelsIndividually:(NSArray<NSString *> *)channelNames
+                                      epgURL:(NSString *)epgURL
+                                  completion:(void (^)(NSDictionary<NSString *, NSArray<TVLiveProgram *> *> * _Nonnull results))completion {
+    dispatch_group_t group = dispatch_group_create();
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(4);
+    NSMutableDictionary<NSString *, NSArray<TVLiveProgram *> *> *results = [NSMutableDictionary dictionary];
+    for (NSString *name in channelNames) {
+        dispatch_group_enter(group);
+        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+        [self fetchProgramsForChannel:name epgURL:epgURL completion:^(NSArray<TVLiveProgram *> * _Nullable programs) {
+            results[name] = programs ?: @[];
+            dispatch_semaphore_signal(semaphore);
+            dispatch_group_leave(group);
+        }];
+    }
+    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+        if (completion) completion(results);
+    });
+}
+
+// 解析整份 XMLTV 节目单并按频道分发：返回以“频道显示名（含规范化别名）”为键的节目单字典
+- (NSDictionary<NSString *, NSArray<TVLiveProgram *> *> *)parseXMLTVProgramsByChannel:(NSString *)xml {
+    NSError *error = nil;
+    NSXMLDocument *document = [[NSXMLDocument alloc] initWithXMLString:xml options:0 error:&error];
+    if (!document) return @{};
+
+    // 频道 id → 显示名列表
+    NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *idToNames = [NSMutableDictionary dictionary];
+    NSArray<NSXMLElement *> *channelNodes = [document nodesForXPath:@"//channel" error:&error];
+    for (NSXMLElement *channel in channelNodes) {
+        NSString *cid = [channel attributeForName:@"id"].stringValue;
+        if (cid.length == 0) continue;
+        NSMutableArray<NSString *> *names = [NSMutableArray array];
+        for (NSXMLElement *dn in [channel elementsForName:@"display-name"]) {
+            if (dn.stringValue.length > 0) [names addObject:dn.stringValue];
+        }
+        if (names.count > 0) idToNames[cid] = names;
+    }
+
+    // 频道 id → 节目单
+    NSMutableDictionary<NSString *, NSMutableArray<TVLiveProgram *> *> *byId = [NSMutableDictionary dictionary];
+    NSArray<NSXMLElement *> *programmeNodes = [document nodesForXPath:@"//programme" error:&error];
+    for (NSXMLElement *programme in programmeNodes) {
+        NSString *cid = [programme attributeForName:@"channel"].stringValue;
+        if (cid.length == 0) continue;
+        NSString *title = @"";
+        for (NSXMLElement *tn in [programme elementsForName:@"title"]) {
+            if (tn.stringValue.length > 0) {
+                title = tn.stringValue;
+                break;
+            }
+        }
+        if (title.length == 0) continue;
+        TVLiveProgram *program = [[TVLiveProgram alloc] init];
+        program.title = title;
+        program.startTime = [self hhmmFromISO8601:[programme attributeForName:@"start"].stringValue];
+        program.endTime = [self hhmmFromISO8601:[programme attributeForName:@"stop"].stringValue];
+        NSMutableArray<TVLiveProgram *> *list = byId[cid];
+        if (!list) {
+            list = [NSMutableArray array];
+            byId[cid] = list;
+        }
+        [list addObject:program];
+    }
+
+    // 展平为 显示名（含规范化别名）→ 节目单，便于按频道名匹配
+    NSMutableDictionary<NSString *, NSArray<TVLiveProgram *> *> *result = [NSMutableDictionary dictionary];
+    for (NSString *cid in byId) {
+        NSArray<TVLiveProgram *> *programs = byId[cid];
+        NSArray<NSString *> *names = idToNames[cid];
+        if (names.count == 0) {
+            result[cid] = programs;
+            continue;
+        }
+        for (NSString *name in names) {
+            result[name] = programs;
+            NSString *norm = [self normalizedEPGChannelName:name];
+            if (![norm isEqualToString:name]) result[norm] = programs;
+        }
+    }
+    return result;
 }
 
 // 规范化频道名以提高 EPG 匹配率：央视系 “CCTV-1 综合” → “CCTV1”，其余去除空格

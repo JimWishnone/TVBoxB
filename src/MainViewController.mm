@@ -6,11 +6,119 @@
 
 static NSString *const kVODItemIdentifier = @"VODItemIdentifier";
 static NSString *const kTVBoxHistoryKey = @"TVBoxHistory";
+static NSString *const kTVBoxSaveHistoryKey = @"TVBoxSaveHistory";
+static NSString *const kTVBoxHistoryLimitKey = @"TVBoxHistoryLimit";
 static NSString *const kTVBoxFavoritesKey = @"TVBoxFavorites";
 static NSString *const kTVBoxSearchKeywordsKey = @"TVBoxSearchKeywords";
 static NSString *const kTVBoxFavoriteDragType = @"com.TVBox.favorite.drag";
 static const NSUInteger kTVBoxHistoryLimit = 30;
 static const NSUInteger kTVBoxSearchKeywordsLimit = 12;
+
+#pragma mark - 图片缓存
+
+// 全局图片内存缓存，避免列表滚动时对同一海报/图标反复发起网络请求。
+static NSCache<NSString *, NSImage *> *TVBoxImageCache(void) {
+    static NSCache *cache = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [[NSCache alloc] init];
+        cache.countLimit = 600;
+    });
+    return cache;
+}
+
+// 进行中的请求登记表：同一 URL 只允许一个请求在途，其余调用方仅登记回调等待结果。
+static NSMutableDictionary<NSString *, NSMutableArray<void (^)(NSImage * _Nullable)> *> *TVBoxInFlightImageRequests(void) {
+    static NSMutableDictionary *requests = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        requests = [NSMutableDictionary dictionary];
+    });
+    return requests;
+}
+
+// 图片磁盘缓存目录：~/Library/Caches/TVBox/ImageCache，持久化已下载的海报/图标，重启后无需重新下载。
+static NSString *TVBoxImageDiskDirectory(void) {
+    static NSString *dir = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *caches = [NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) firstObject];
+        dir = [[caches stringByAppendingPathComponent:@"TVBox"] stringByAppendingPathComponent:@"ImageCache"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    });
+    return dir;
+}
+
+static NSString *TVBoxImageDiskPath(NSString *urlString) {
+    return [TVBoxImageDiskDirectory() stringByAppendingPathComponent:[TVBoxHexHash(urlString) stringByAppendingString:@".img"]];
+}
+
+// 异步加载图片：命中内存/磁盘缓存直接回调（主线程）；未命中则请求网络，缓存结果并回调。
+// 所有回调统一在主线程触发，调用方仍需自行判断 cell 是否已被复用。
+static void TVBoxLoadImage(NSString *urlString, void (^completion)(NSImage * _Nullable image)) {
+    if (urlString.length == 0) {
+        if (completion) completion(nil);
+        return;
+    }
+    NSCache<NSString *, NSImage *> *cache = TVBoxImageCache();
+    NSImage *cached = [cache objectForKey:urlString];
+    if (cached) {
+        if (completion) completion(cached);
+        return;
+    }
+
+    // 内存未命中时读取磁盘缓存，命中后回填内存缓存
+    NSData *diskData = [NSData dataWithContentsOfFile:TVBoxImageDiskPath(urlString)];
+    if (diskData) {
+        NSImage *diskImage = [[NSImage alloc] initWithData:diskData];
+        if (diskImage) {
+            [cache setObject:diskImage forKey:urlString];
+            if (completion) completion(diskImage);
+            return;
+        }
+    }
+
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (!url) {
+        if (completion) completion(nil);
+        return;
+    }
+
+    NSMutableDictionary<NSString *, NSMutableArray<void (^)(NSImage * _Nullable)> *> *inFlight = TVBoxInFlightImageRequests();
+    NSMutableArray<void (^)(NSImage * _Nullable)> *waiters = inFlight[urlString];
+    if (waiters) {
+        // 相同 URL 已有请求在途，仅登记回调，避免重复下载。
+        if (completion) [waiters addObject:[completion copy]];
+        return;
+    }
+    waiters = [NSMutableArray array];
+    if (completion) [waiters addObject:[completion copy]];
+    inFlight[urlString] = waiters;
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+    request.timeoutInterval = 10.0;
+    [request setValue:@"okhttp/3.15" forHTTPHeaderField:@"User-Agent"];
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:request
+        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+            NSImage *image = nil;
+            if (!error && data) {
+                image = [[NSImage alloc] initWithData:data];
+            }
+            if (image) {
+                [cache setObject:image forKey:urlString];
+                // 下载成功后写入磁盘缓存，供下次启动直接使用
+                [data writeToFile:TVBoxImageDiskPath(urlString) atomically:YES];
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSArray<void (^)(NSImage * _Nullable)> *callbacks = [inFlight[urlString] copy];
+                [inFlight removeObjectForKey:urlString];
+                for (void (^block)(NSImage * _Nullable) in callbacks) {
+                    block(image);
+                }
+            });
+        }] resume];
+}
 
 @interface TVPosterImageView : NSImageView
 @end
@@ -144,6 +252,9 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
         _iconView = [[NSImageView alloc] init];
         _iconView.translatesAutoresizingMaskIntoConstraints = NO;
         _iconView.imageScaling = NSImageScaleProportionallyUpOrDown;
+        _iconView.wantsLayer = YES;
+        _iconView.layer.cornerRadius = 4;
+        _iconView.layer.masksToBounds = YES;
         [self addSubview:_iconView];
         [NSLayoutConstraint activateConstraints:@[
             [_iconView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:6],
@@ -463,23 +574,11 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     self.posterView.image = [VODCollectionItem defaultPosterImage];
 
     if (urlString.length == 0) return;
-    NSURL *url = [NSURL URLWithString:urlString];
-    if (!url) return;
-
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url
-        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-        NSImage *image = nil;
-        if (!error && data) {
-            image = [[NSImage alloc] initWithData:data];
+    TVBoxLoadImage(urlString, ^(NSImage * _Nullable image) {
+        if ([self.posterURLString isEqualToString:urlString]) {
+            self.posterView.image = image ?: [VODCollectionItem defaultPosterImage];
         }
-        NSImage *finalImage = image ?: [VODCollectionItem defaultPosterImage];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if ([self.posterURLString isEqualToString:urlString]) {
-                self.posterView.image = finalImage;
-            }
-        });
-    }];
-    [task resume];
+    });
 }
 
 - (void)setSelected:(BOOL)selected {
@@ -556,6 +655,8 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 @property (nonatomic, strong) NSTextField *settingsProgressLabel;
 @property (nonatomic, strong) NSTextField *vodValidationResultLabel;
 @property (nonatomic, strong) NSTextField *liveValidationResultLabel;
+@property (nonatomic, strong) NSButton *historySaveSwitch;
+@property (nonatomic, strong) NSTextField *historyLimitField;
 
 @property (nonatomic, strong) NSTableView *historyTable;
 @property (nonatomic, strong) NSMutableArray<TVHistoryItem *> *historyItems;
@@ -1284,6 +1385,29 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     self.settingsProgressLabel.lineBreakMode = NSLineBreakByWordWrapping;
     self.settingsProgressLabel.translatesAutoresizingMaskIntoConstraints = NO;
 
+    // ---- 历史记录设置 ----
+    NSTextField *historyTitle = [NSTextField labelWithString:@"历史记录"];
+    historyTitle.font = [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold];
+    historyTitle.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.historySaveSwitch = [NSButton checkboxWithTitle:@"保存视频播放历史记录" target:self action:@selector(historySaveSwitchChanged:)];
+    self.historySaveSwitch.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSTextField *historyLimitLabel = [NSTextField labelWithString:@"历史记录保存条数："];
+    historyLimitLabel.font = [NSFont systemFontOfSize:13];
+    historyLimitLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.historyLimitField = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    self.historyLimitField.font = [NSFont systemFontOfSize:16];
+    self.historyLimitField.controlSize = NSControlSizeLarge;
+    self.historyLimitField.alignment = NSTextAlignmentCenter;
+    self.historyLimitField.delegate = self;
+    self.historyLimitField.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSTextField *historyLimitUnit = [NSTextField labelWithString:@"条"];
+    historyLimitUnit.font = [NSFont systemFontOfSize:13];
+    historyLimitUnit.translatesAutoresizingMaskIntoConstraints = NO;
+
     [container addSubview:title];
     [container addSubview:hintLabel];
     [container addSubview:vodTitle];
@@ -1296,6 +1420,11 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     [container addSubview:self.liveValidationResultLabel];
     [container addSubview:saveButton];
     [container addSubview:self.settingsProgressLabel];
+    [container addSubview:historyTitle];
+    [container addSubview:self.historySaveSwitch];
+    [container addSubview:historyLimitLabel];
+    [container addSubview:self.historyLimitField];
+    [container addSubview:historyLimitUnit];
 
     [NSLayoutConstraint activateConstraints:@[
         [title.topAnchor constraintEqualToAnchor:container.topAnchor constant:16],
@@ -1337,9 +1466,26 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
         [self.settingsProgressLabel.topAnchor constraintEqualToAnchor:saveButton.bottomAnchor constant:12],
         [self.settingsProgressLabel.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
         [self.settingsProgressLabel.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
+
+        [historyTitle.topAnchor constraintEqualToAnchor:self.settingsProgressLabel.bottomAnchor constant:18],
+        [historyTitle.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
+
+        [self.historySaveSwitch.topAnchor constraintEqualToAnchor:historyTitle.bottomAnchor constant:8],
+        [self.historySaveSwitch.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
+
+        [historyLimitLabel.topAnchor constraintEqualToAnchor:self.historySaveSwitch.bottomAnchor constant:12],
+        [historyLimitLabel.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
+
+        [self.historyLimitField.leadingAnchor constraintEqualToAnchor:historyLimitLabel.trailingAnchor constant:8],
+        [self.historyLimitField.centerYAnchor constraintEqualToAnchor:historyLimitLabel.centerYAnchor],
+        [self.historyLimitField.widthAnchor constraintEqualToConstant:80],
+
+        [historyLimitUnit.leadingAnchor constraintEqualToAnchor:self.historyLimitField.trailingAnchor constant:6],
+        [historyLimitUnit.centerYAnchor constraintEqualToAnchor:self.historyLimitField.centerYAnchor],
     ]];
 
     [self loadConfigURLRows];
+    [self loadHistorySettings];
     return container;
 }
 
@@ -1360,7 +1506,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     title.textColor = [NSColor whiteColor];
     title.translatesAutoresizingMaskIntoConstraints = NO;
 
-    NSTextField *version = [NSTextField labelWithString:@"版本 v0.1.0"];
+    NSTextField *version = [NSTextField labelWithString:@"版本 v0.1.1"];
     version.textColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.85];
     version.translatesAutoresizingMaskIntoConstraints = NO;
 
@@ -1683,7 +1829,12 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     request.timeoutInterval = 10;
     request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
     [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        NSString *status = (error == nil) ? @"可用" : @"不可用";
+        NSInteger statusCode = 200;
+        if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+            statusCode = ((NSHTTPURLResponse *)response).statusCode;
+        }
+        BOOL available = (error == nil && statusCode >= 200 && statusCode < 300);
+        NSString *status = available ? @"可用" : @"不可用";
         if (completion) completion(status);
     }] resume];
 }
@@ -2302,8 +2453,22 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 
 // 用模态窗口显示该视频的介绍信息和可播放的视频列表，并提供播放按钮
 - (void)showDetailModalForVideo:(TVVideo *)detail site:(TVSite *)site {
+    // 若已存在详情模态窗（例如快速连续点击多个视频），先关闭旧的，
+    // 避免多个 sheet 叠加导致按钮 target/action 指向失效。
+    NSWindow *existingModal = self.detailModalWindow;
+    if (existingModal) {
+        self.detailModalWindow = nil;
+        if (existingModal.sheetParent) {
+            [existingModal.sheetParent endSheet:existingModal returnCode:NSModalResponseCancel];
+        } else {
+            [existingModal orderOut:nil];
+        }
+    }
+
     self.detailModalVideo = detail;
     self.detailModalSite = site;
+    // 回填站点信息，供播放器记录“跳过片头片尾”等按站点区分的设置
+    detail.sourceSite = site;
 
     NSArray<TVPlaySource *> *sources = [detail playSources];
 
@@ -2491,7 +2656,10 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
         if (returnCode == NSModalResponseOK) {
             [self beginPlaybackFromModal];
         }
-        self.detailModalWindow = nil;
+        // 仅当详情窗引用仍是当前模态窗时才清空，避免误清新弹出的模态窗
+        if (self.detailModalWindow == modal) {
+            self.detailModalWindow = nil;
+        }
     }];
 }
 
@@ -2577,21 +2745,9 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 - (void)loadPosterImage:(NSString *)urlString into:(NSImageView *)imageView {
     imageView.image = [VODCollectionItem defaultPosterImage];
     if (urlString.length == 0) return;
-    NSURL *url = [NSURL URLWithString:urlString];
-    if (!url) return;
-
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url
-        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-        NSImage *image = nil;
-        if (!error && data) {
-            image = [[NSImage alloc] initWithData:data];
-        }
-        NSImage *finalImage = image ?: [VODCollectionItem defaultPosterImage];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            imageView.image = finalImage;
-        });
-    }];
-    [task resume];
+    TVBoxLoadImage(urlString, ^(NSImage * _Nullable image) {
+        imageView.image = image ?: [VODCollectionItem defaultPosterImage];
+    });
 }
 
 // 以 HTML 格式解释简介内容，支持 <br>、<p>、<b>、<i> 等标签
@@ -2717,7 +2873,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     return nil;
 }
 
-// 后台拉取各频道的节目单，成功后逐条刷新表格，频道有节目单时显示“节目单”链接
+// 后台批量拉取各频道的节目单，成功后逐条刷新表格，频道有节目单时显示“节目单”链接
 - (void)loadProgramSchedulesForChannels:(NSArray<TVLiveChannel *> *)channels {
     NSString *epgURL = [self currentLiveEPGURL];
     if (epgURL.length == 0) {
@@ -2736,31 +2892,20 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     if (names.count == 0) return;
 
     NSInteger generation = ++self.liveEPGGeneration;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        dispatch_semaphore_t semaphore = dispatch_semaphore_create(4);
-        for (NSString *name in names) {
-            if (generation != self.liveEPGGeneration) break;
-            dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-            [self.config fetchProgramsForChannel:name
-                                         epgURL:epgURL
-                                     completion:^(NSArray<TVLiveProgram *> * _Nullable programs) {
-                if (generation == self.liveEPGGeneration) {
-                    NSArray<TVLiveProgram *> *result = (programs.count > 0) ? programs : @[];
-                    for (TVLiveChannel *channel in channels) {
-                        if ([channel.name isEqualToString:name]) {
-                            channel.programs = result;
-                        }
-                    }
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        if (generation == self.liveEPGGeneration) {
-                            [self.liveTable reloadData];
-                        }
-                    });
-                }
-                dispatch_semaphore_signal(semaphore);
-            }];
+    [self.config fetchProgramsForChannels:names
+                                   epgURL:epgURL
+                               completion:^(NSDictionary<NSString *, NSArray<TVLiveProgram *> *> *results) {
+        if (generation != self.liveEPGGeneration) return;
+        for (TVLiveChannel *channel in channels) {
+            NSArray<TVLiveProgram *> *programs = results[channel.name];
+            channel.programs = (programs.count > 0) ? programs : @[];
         }
-    });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (generation == self.liveEPGGeneration) {
+                [self.liveTable reloadData];
+            }
+        });
+    }];
 }
 
 // 弹出模态窗体显示某个频道的节目单
@@ -3159,6 +3304,58 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     self.liveConfigURLField.stringValue = liveURLs.count > 0 ? liveURLs.firstObject : @"";
 }
 
+// 读取并回填历史记录相关设置（是否保存 + 保存条数）
+- (void)loadHistorySettings {
+    BOOL enabled = [self saveHistoryEnabled];
+    self.historySaveSwitch.state = enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    self.historyLimitField.integerValue = (NSInteger)[self historyLimit];
+    self.historyLimitField.enabled = enabled;
+}
+
+// 切换“保存视频播放历史记录”选项：立即持久化，并同步条数输入框可用状态
+- (void)historySaveSwitchChanged:(id)sender {
+    BOOL enabled = (self.historySaveSwitch.state == NSControlStateValueOn);
+    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:kTVBoxSaveHistoryKey];
+    self.historyLimitField.enabled = enabled;
+    if (!enabled) {
+        // 关闭历史记录时清空已保存内容，避免残留旧记录
+        [self.historyItems removeAllObjects];
+        [self saveHistory];
+        [self.historyTable reloadData];
+    }
+}
+
+// 用户结束编辑“保存条数”后，持久化新值并裁剪现有历史
+- (void)controlTextDidEndEditing:(NSNotification *)notification {
+    if (notification.object != self.historyLimitField) return;
+    NSInteger limit = self.historyLimitField.integerValue;
+    if (limit < 1) limit = 1;
+    if (limit > 500) limit = 500;
+    self.historyLimitField.integerValue = limit;
+    [[NSUserDefaults standardUserDefaults] setInteger:limit forKey:kTVBoxHistoryLimitKey];
+    while (self.historyItems.count > (NSUInteger)limit) {
+        [self.historyItems removeLastObject];
+    }
+    [self saveHistory];
+    [self.historyTable reloadData];
+}
+
+// 是否保存播放历史记录（未设置时默认开启）
+- (BOOL)saveHistoryEnabled {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if ([defaults objectForKey:kTVBoxSaveHistoryKey] == nil) return YES;
+    return [defaults boolForKey:kTVBoxSaveHistoryKey];
+}
+
+// 历史记录保存条数上限（未设置时默认 30）
+- (NSUInteger)historyLimit {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if ([defaults objectForKey:kTVBoxHistoryLimitKey] == nil) return kTVBoxHistoryLimit;
+    NSInteger limit = [defaults integerForKey:kTVBoxHistoryLimitKey];
+    if (limit < 1) limit = 1;
+    return (NSUInteger)limit;
+}
+
 - (void)saveConfigURLAction:(id)sender {
     // 结束当前编辑，确保已输入内容提交
     [self.view.window makeFirstResponder:nil];
@@ -3475,6 +3672,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 }
 
 - (void)insertHistoryItem:(TVHistoryItem *)item {
+    if (![self saveHistoryEnabled]) return;
     if (!item || item.title.length == 0) return;
     // 去重：同一类型、同一名称、同一集数的记录只保留最新一条。
     for (NSInteger i = (NSInteger)self.historyItems.count - 1; i >= 0; i--) {
@@ -3486,8 +3684,8 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
         }
     }
     [self.historyItems insertObject:item atIndex:0];
-    // 仅保留最近 30 条播放记录。
-    while (self.historyItems.count > kTVBoxHistoryLimit) {
+    // 仅保留用户设定的条数。
+    while (self.historyItems.count > [self historyLimit]) {
         [self.historyItems removeLastObject];
     }
     [self saveHistory];
@@ -3496,6 +3694,11 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 
 - (void)loadHistory {
     [self.historyItems removeAllObjects];
+    // 关闭历史记录时不再加载已保存内容
+    if (![self saveHistoryEnabled]) {
+        [self.historyTable reloadData];
+        return;
+    }
     NSArray *array = [[NSUserDefaults standardUserDefaults] arrayForKey:kTVBoxHistoryKey];
     if ([array isKindOfClass:[NSArray class]]) {
         for (id obj in array) {
@@ -3505,14 +3708,19 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
             }
         }
     }
-    // 加载后同样裁剪到最近 30 条。
-    while (self.historyItems.count > kTVBoxHistoryLimit) {
+    // 加载后同样裁剪到用户设定的条数。
+    while (self.historyItems.count > [self historyLimit]) {
         [self.historyItems removeLastObject];
     }
     [self.historyTable reloadData];
 }
 
 - (void)saveHistory {
+    // 关闭历史记录时清除已保存内容
+    if (![self saveHistoryEnabled]) {
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:kTVBoxHistoryKey];
+        return;
+    }
     NSMutableArray *array = [NSMutableArray array];
     for (TVHistoryItem *item in self.historyItems) {
         [array addObject:[item toDictionary]];
@@ -3740,6 +3948,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
         }
         [self setStatus:@""];
         TVVideo *detail = [TVVideo videoFromDictionary:(NSDictionary *)list[0]];
+        detail.sourceSite = site;
         [self presentPlayerWithTitle:detail.name block:^(PlayerViewController *player) {
             [player resumeVideo:detail sourceIndex:0 episodeIndex:0 resumeTime:0];
         }];
@@ -3839,6 +4048,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
         }
         [self setStatus:@""];
         TVVideo *detail = [TVVideo videoFromDictionary:(NSDictionary *)list[0]];
+        detail.sourceSite = site;
         [self presentPlayerWithTitle:detail.name block:^(PlayerViewController *player) {
             [player resumeVideo:detail sourceIndex:sourceIndex episodeIndex:episodeIndex resumeTime:resumeTime];
         }];
@@ -4131,25 +4341,12 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 }
 
 - (void)loadLiveLogoForChannel:(TVLiveChannel *)channel intoCell:(TVLiveIconCell *)cell {
-    NSURL *url = [NSURL URLWithString:channel.logo];
-    if (!url) return;
-
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    request.timeoutInterval = 10.0;
-    [request setValue:@"okhttp/3.15" forHTTPHeaderField:@"User-Agent"];
-
-    [[[NSURLSession sharedSession] dataTaskWithRequest:request
-        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-            NSImage *image = nil;
-            if (!error && data) {
-                image = [[NSImage alloc] initWithData:data];
-            }
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (image && [cell.channelKey isEqualToString:channel.name]) {
-                    cell.iconView.image = image;
-                }
-            });
-        }] resume];
+    if (channel.logo.length == 0) return;
+    TVBoxLoadImage(channel.logo, ^(NSImage * _Nullable image) {
+        if (image && [cell.channelKey isEqualToString:channel.name]) {
+            cell.iconView.image = image;
+        }
+    });
 }
 
 #pragma mark - NSTableViewDelegate
@@ -4207,6 +4404,14 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
             [self openVideo:video site:video.sourceSite];
         }
     }
+
+    // 处理完点击后取消选中，确保再次单击同一视频仍能触发选中回调。
+    // 注意：不能在选中回调内部同步修改选中状态，否则会触发 AppKit 的重入，
+    // 导致 openVideo 被重复调用、重复弹出详情模态窗，进而使“取消/播放”按钮失效。
+    NSSet<NSIndexPath *> *selected = [indexPaths copy];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [collectionView deselectItemsAtIndexPaths:selected];
+    });
 }
 
 #pragma mark - 工具
