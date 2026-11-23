@@ -1,4 +1,6 @@
 #import "PlayerViewController.h"
+#import "TVBoxVLCPlayerView.h"
+#import "ConfigManager.h"
 #import <AVFoundation/AVFoundation.h>
 #import <AVKit/AVKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -6,9 +8,14 @@
 static void *PlayerItemStatusContext = &PlayerItemStatusContext;
 static void *PlayerBufferContext = &PlayerBufferContext;
 
+static NSString * const kTVBoxUseVLCKey = @"TVBoxUseVLCPlayback";
+
 @interface PlayerViewController ()
 
+@property (nonatomic, assign) BOOL useVLC;
 @property (nonatomic, strong) AVPlayerView *playerView;
+@property (nonatomic, strong) TVBoxVLCPlayerView *vlcPlayerView;
+@property (nonatomic, strong) NSView *activeVideoView;
 @property (nonatomic, strong) NSButton *playPauseButton;
 @property (nonatomic, strong) NSButton *skipButton;
 @property (nonatomic, strong) NSStackView *controlBar;
@@ -53,6 +60,7 @@ static void *PlayerBufferContext = &PlayerBufferContext;
 @property (nonatomic, assign) NSTimeInterval pendingSeekTime;
 @property (nonatomic, strong) NSTimer *stallRecoveryTimer;
 @property (nonatomic, strong) id playbackTimeObserver;
+@property (nonatomic, strong) NSTimer *vlcTickTimer;
 
 @end
 
@@ -65,12 +73,32 @@ static void *PlayerBufferContext = &PlayerBufferContext;
 - (void)viewDidLoad {
     [super viewDidLoad];
 
-    self.playerView = [[AVPlayerView alloc] init];
-    self.playerView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.playerView.controlsStyle = AVPlayerViewControlsStyleFloating;
-    [self.view addSubview:self.playerView];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    self.useVLC = [defaults boolForKey:kTVBoxUseVLCKey] && [TVBoxVLCPlayerView vlcAvailable];
 
-    // 顶部标题覆盖层：当前视频信息覆盖在视频组件上显示，带渐变蒙版保证在画面上清晰可读
+    if (self.useVLC) {
+        self.vlcPlayerView = [[TVBoxVLCPlayerView alloc] init];
+        self.vlcPlayerView.translatesAutoresizingMaskIntoConstraints = NO;
+        self.activeVideoView = self.vlcPlayerView;
+
+        __weak typeof(self) weakSelf = self;
+        self.vlcPlayerView.onPlaybackError = ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            if (strongSelf.liveChannels.count > 0) {
+                [strongSelf handlePlaybackFailure];
+            } else {
+                [strongSelf showNetworkErrorAlert];
+            }
+        };
+    } else {
+        self.playerView = [[AVPlayerView alloc] init];
+        self.playerView.translatesAutoresizingMaskIntoConstraints = NO;
+        self.playerView.controlsStyle = AVPlayerViewControlsStyleFloating;
+        self.activeVideoView = self.playerView;
+    }
+    [self.view addSubview:self.activeVideoView];
+
     self.titleLabel = [NSTextField labelWithString:@""];
     self.titleLabel.font = [NSFont systemFontOfSize:16 weight:NSFontWeightSemibold];
     self.titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -156,10 +184,10 @@ static void *PlayerBufferContext = &PlayerBufferContext;
 
     // 视频播放组件占满整个窗口
     [NSLayoutConstraint activateConstraints:@[
-        [self.playerView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
-        [self.playerView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [self.playerView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [self.playerView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [self.activeVideoView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [self.activeVideoView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.activeVideoView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.activeVideoView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
     ]];
 
     // 顶部标题覆盖层约束：覆盖在视频顶部，标题置于左上角
@@ -350,7 +378,11 @@ static void *PlayerBufferContext = &PlayerBufferContext;
 - (BOOL)handleKeyEvent:(NSEvent *)event {
     if (!self.view.window || !self.view.window.isKeyWindow) return NO;
 
-    // 隐藏模式下按 X 键恢复显示。
+    if ((event.modifierFlags & NSEventModifierFlagCommand) && event.keyCode == 13) {
+        [self closePlayerWindow];
+        return YES;
+    }
+
     if (self.windowImmersive) {
         NSString *chars = event.charactersIgnoringModifiers.lowercaseString;
         if ([chars isEqualToString:@"x"]) {
@@ -456,20 +488,41 @@ static NSCache<NSString *, NSImage *> *TVBoxWhiteSymbolCache(void) {
     [self updateImmersiveContent];
 }
 
-// 点击播放按钮来播放、暂停视频播放
+- (void)closePlayerWindow {
+    NSWindow *window = self.view.window;
+    if (!window) return;
+    if (self.fullscreenActive) {
+        [window toggleFullScreen:nil];
+    }
+    [window close];
+}
+
 - (void)togglePlayPauseAction:(id)sender {
-    AVPlayer *player = self.playerView.player;
-    if (!player) return;
-    if (player.rate > 0) {
-        [player pause];
+    if (self.useVLC) {
+        if (self.vlcPlayerView.paused) {
+            [self.vlcPlayerView play];
+        } else {
+            [self.vlcPlayerView pause];
+        }
     } else {
-        [player play];
+        AVPlayer *player = self.playerView.player;
+        if (!player) return;
+        if (player.rate > 0) {
+            [player pause];
+        } else {
+            [player play];
+        }
     }
     [self updatePlayPauseButton];
 }
 
 - (void)updatePlayPauseButton {
-    BOOL playing = (self.playerView.player && self.playerView.player.rate > 0);
+    BOOL playing = NO;
+    if (self.useVLC) {
+        playing = !self.vlcPlayerView.paused;
+    } else {
+        playing = (self.playerView.player && self.playerView.player.rate > 0);
+    }
     NSString *symbol = playing ? @"pause.fill" : @"play.fill";
     self.playPauseButton.image = [self whiteSymbolImage:symbol description:@"播放/暂停"];
     self.playPauseButton.toolTip = playing ? @"暂停" : @"播放";
@@ -582,28 +635,38 @@ static NSCache<NSString *, NSImage *> *TVBoxWhiteSymbolCache(void) {
 }
 
 - (void)stop {
-    AVPlayer *player = self.playerView.player;
-    if (player && self.playbackTimeObserver) {
-        [player removeTimeObserver:self.playbackTimeObserver];
-        self.playbackTimeObserver = nil;
-    }
-    [player pause];
-    self.playerView.player = nil;
-    [self.stallRecoveryTimer invalidate];
-    self.stallRecoveryTimer = nil;
-    if (self.currentItem) {
-        [self.currentItem removeObserver:self forKeyPath:@"status" context:PlayerItemStatusContext];
-        [self.currentItem removeObserver:self forKeyPath:@"playbackBufferEmpty" context:PlayerBufferContext];
-        [self.currentItem removeObserver:self forKeyPath:@"playbackLikelyToKeepUp" context:PlayerBufferContext];
-        [[NSNotificationCenter defaultCenter] removeObserver:self name:AVPlayerItemDidPlayToEndTimeNotification object:self.currentItem];
-        [[NSNotificationCenter defaultCenter] removeObserver:self name:AVPlayerItemPlaybackStalledNotification object:self.currentItem];
-        self.currentItem = nil;
+    [self.vlcTickTimer invalidate];
+    self.vlcTickTimer = nil;
+
+    if (self.useVLC) {
+        [self.vlcPlayerView stop];
+    } else {
+        AVPlayer *player = self.playerView.player;
+        if (player && self.playbackTimeObserver) {
+            [player removeTimeObserver:self.playbackTimeObserver];
+            self.playbackTimeObserver = nil;
+        }
+        [player pause];
+        self.playerView.player = nil;
+        [self.stallRecoveryTimer invalidate];
+        self.stallRecoveryTimer = nil;
+        if (self.currentItem) {
+            [self.currentItem removeObserver:self forKeyPath:@"status" context:PlayerItemStatusContext];
+            [self.currentItem removeObserver:self forKeyPath:@"playbackBufferEmpty" context:PlayerBufferContext];
+            [self.currentItem removeObserver:self forKeyPath:@"playbackLikelyToKeepUp" context:PlayerBufferContext];
+            [[NSNotificationCenter defaultCenter] removeObserver:self name:AVPlayerItemDidPlayToEndTimeNotification object:self.currentItem];
+            [[NSNotificationCenter defaultCenter] removeObserver:self name:AVPlayerItemPlaybackStalledNotification object:self.currentItem];
+            self.currentItem = nil;
+        }
     }
     [self setLoadingVisible:NO];
     [self updatePlayPauseButton];
 }
 
 - (NSTimeInterval)currentPlaybackTime {
+    if (self.useVLC) {
+        return [self.vlcPlayerView currentTime];
+    }
     AVPlayer *player = self.playerView.player;
     if (!player) return 0;
     CMTime time = player.currentTime;
@@ -736,9 +799,47 @@ static NSCache<NSString *, NSImage *> *TVBoxWhiteSymbolCache(void) {
     NSURL *url = [NSURL URLWithString:urlString];
     if (!url) return;
 
-    // 切换内容时取消上一次尚未触发的断流恢复定时器
     [self.stallRecoveryTimer invalidate];
     self.stallRecoveryTimer = nil;
+
+    [self preflightURL:url completion:^(BOOL reachable, NSInteger httpStatus) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!reachable || (httpStatus > 0 && httpStatus >= 400)) {
+                if (self.liveChannels.count > 0) {
+                    [self handlePlaybackFailure];
+                } else {
+                    [self showNetworkErrorAlert];
+                }
+                return;
+            }
+            [self actuallyPlayURL:urlString];
+        });
+    }];
+}
+
+- (void)actuallyPlayURL:(NSString *)urlString {
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (!url) return;
+
+    if (self.useVLC) {
+        [self setLoadingVisible:YES];
+        [self.vlcPlayerView playURL:urlString];
+        [self updatePlayPauseButton];
+        if (self.pendingSeekTime > 0) {
+            NSTimeInterval time = self.pendingSeekTime;
+            self.pendingSeekTime = 0;
+            [self.vlcPlayerView seekToTime:time];
+        }
+        [self.vlcTickTimer invalidate];
+        __weak typeof(self) weakSelf = self;
+        self.vlcTickTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer * _Nonnull timer) {
+            [weakSelf handlePlaybackTimeTick];
+        }];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self setLoadingVisible:NO];
+        });
+        return;
+    }
 
     if (self.currentItem) {
         [self.currentItem removeObserver:self forKeyPath:@"status" context:PlayerItemStatusContext];
@@ -750,7 +851,6 @@ static NSCache<NSString *, NSImage *> *TVBoxWhiteSymbolCache(void) {
     }
 
     AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
-    // 点播预留更大缓冲（流畅优先），直播使用小缓冲（低延迟优先）
     item.preferredForwardBufferDuration = (self.video != nil) ? 30.0 : 3.0;
     self.currentItem = item;
     [item addObserver:self forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:PlayerItemStatusContext];
@@ -759,9 +859,6 @@ static NSCache<NSString *, NSImage *> *TVBoxWhiteSymbolCache(void) {
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(playerItemDidPlayToEndTime:) name:AVPlayerItemDidPlayToEndTimeNotification object:item];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(playerItemDidStall:) name:AVPlayerItemPlaybackStalledNotification object:item];
 
-    // 复用同一个 AVPlayer，通过 replaceCurrentItemWithPlayerItem: 切换内容。
-    // 每次切换频道/线路都新建 AVPlayer 并整体替换 playerView.player，会导致上一个
-    // 播放器在尚未停止的状态下被释放，其音频输出可能残留，与新内容的声音同时播放。
     AVPlayer *player = self.playerView.player;
     if (!player) {
         player = [[AVPlayer alloc] init];
@@ -824,9 +921,14 @@ static NSCache<NSString *, NSImage *> *TVBoxWhiteSymbolCache(void) {
 
 // 直播视频无法正确播放时，自动切换到下一线路
 - (void)handlePlaybackFailure {
-    if (self.liveLines.count <= 1) return;
-    // 已尝试过所有线路仍未成功，停止自动切换，避免死循环
-    if (self.liveTriedLines >= (NSInteger)self.liveLines.count) return;
+    if (self.liveLines.count <= 1) {
+        [self showNetworkErrorAlert];
+        return;
+    }
+    if (self.liveTriedLines >= (NSInteger)self.liveLines.count) {
+        [self showNetworkErrorAlert];
+        return;
+    }
 
     self.liveTriedLines++;
     NSInteger next = self.liveLineIndex + 1;
@@ -834,6 +936,21 @@ static NSCache<NSString *, NSImage *> *TVBoxWhiteSymbolCache(void) {
     self.liveLineIndex = next;
     [self.sourcePopup selectItemAtIndex:next];
     [self playCurrentLiveLine];
+}
+
+- (void)showNetworkErrorAlert {
+    [self setLoadingVisible:NO];
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"网络有问题";
+    alert.informativeText = @"检查网络连接";
+    alert.alertStyle = NSAlertStyleWarning;
+    [alert addButtonWithTitle:@"好的"];
+    NSWindow *window = self.view.window;
+    if (window) {
+        [alert beginSheetModalForWindow:window completionHandler:nil];
+    } else {
+        [alert runModal];
+    }
 }
 
 // 播放断流（缓冲停滞）通知：直播在超时后仍未恢复时自动切换下一线路；点播交由 AVPlayer 自动缓冲恢复。
@@ -959,6 +1076,9 @@ static NSCache<NSString *, NSImage *> *TVBoxWhiteSymbolCache(void) {
 
 // 获取当前播放条目的总时长（秒），直播或时长未知返回 0
 - (NSTimeInterval)currentItemDuration {
+    if (self.useVLC) {
+        return [self.vlcPlayerView duration];
+    }
     AVPlayer *player = self.playerView.player;
     if (!player || !player.currentItem) return 0;
     CMTime duration = player.currentItem.duration;
@@ -968,28 +1088,35 @@ static NSCache<NSString *, NSImage *> *TVBoxWhiteSymbolCache(void) {
 
 // 未设置片头且当前播放位置靠近片头时，代入当前时间作为片头跳过时间
 - (NSTimeInterval)autoFillIntroSeconds {
-    AVPlayer *player = self.playerView.player;
-    if (!player || !player.currentItem) return 0;
     NSTimeInterval total = [self currentItemDuration];
     if (total <= 0) return 0;
-    NSTimeInterval current = CMTimeGetSeconds(player.currentTime);
+    NSTimeInterval current;
+    if (self.useVLC) {
+        current = [self.vlcPlayerView currentTime];
+    } else {
+        AVPlayer *player = self.playerView.player;
+        if (!player || !player.currentItem) return 0;
+        current = CMTimeGetSeconds(player.currentTime);
+    }
     if (isnan(current) || current <= 0) return 0;
-    // 靠近片头：处于影片前 20% 范围内
     if (current <= total * 0.2) return current;
     return 0;
 }
 
-// 未设置片尾且当前播放位置靠近片尾时，代入当前时间戳作为片尾跳过时间
 - (NSTimeInterval)autoFillOutroSeconds {
-    AVPlayer *player = self.playerView.player;
-    if (!player || !player.currentItem) return 0;
     NSTimeInterval total = [self currentItemDuration];
     if (total <= 0) return 0;
-    NSTimeInterval current = CMTimeGetSeconds(player.currentTime);
+    NSTimeInterval current;
+    if (self.useVLC) {
+        current = [self.vlcPlayerView currentTime];
+    } else {
+        AVPlayer *player = self.playerView.player;
+        if (!player || !player.currentItem) return 0;
+        current = CMTimeGetSeconds(player.currentTime);
+    }
     if (isnan(current)) return 0;
     NSTimeInterval remaining = total - current;
     if (remaining <= 0) return 0;
-    // 靠近片尾：剩余时长处于影片最后 15% 范围内，代入当前时间戳（以 00:00:00 为基准）
     if (remaining <= total * 0.15) return current;
     return 0;
 }
@@ -1011,19 +1138,26 @@ static NSCache<NSString *, NSImage *> *TVBoxWhiteSymbolCache(void) {
     [self saveSkipSettingsForCurrentVideo];
 }
 
-// 将刚保存的跳过设置立即作用到当前播放：片头未播完则直接跳至片头结束处，片尾越过截止点则暂停
 - (void)applySkipSettingsToCurrentPlayback {
     if (!self.video) return;
-    AVPlayer *player = self.playerView.player;
-    if (!player || !player.currentItem) return;
 
     NSTimeInterval intro = self.video.skipIntroSeconds;
     if (intro > 0) {
-        NSTimeInterval current = CMTimeGetSeconds(player.currentTime);
-        if (!isnan(current) && current < intro) {
-            [player seekToTime:CMTimeMakeWithSeconds(intro, NSEC_PER_SEC)
-               toleranceBefore:kCMTimeZero
-                toleranceAfter:kCMTimeZero];
+        NSTimeInterval current;
+        if (self.useVLC) {
+            current = [self.vlcPlayerView currentTime];
+            if (current < intro) {
+                [self.vlcPlayerView seekToTime:intro];
+            }
+        } else {
+            AVPlayer *player = self.playerView.player;
+            if (!player || !player.currentItem) return;
+            current = CMTimeGetSeconds(player.currentTime);
+            if (!isnan(current) && current < intro) {
+                [player seekToTime:CMTimeMakeWithSeconds(intro, NSEC_PER_SEC)
+                   toleranceBefore:kCMTimeZero
+                    toleranceAfter:kCMTimeZero];
+            }
         }
     }
 
@@ -1077,14 +1211,19 @@ static NSCache<NSString *, NSImage *> *TVBoxWhiteSymbolCache(void) {
     }];
 }
 
-// 周期性检查：点播且设置了“跳过片尾”时，播放至设定时间戳（以 00:00:00 为基准）后继续播放下一集。
 - (void)handlePlaybackTimeTick {
     if (!self.video) return;
     NSTimeInterval outro = self.video.skipOutroSeconds;
     if (outro <= 0) return;
-    AVPlayer *player = self.playerView.player;
-    if (!player || !player.currentItem) return;
-    NSTimeInterval current = CMTimeGetSeconds(player.currentTime);
+
+    NSTimeInterval current;
+    if (self.useVLC) {
+        current = [self.vlcPlayerView currentTime];
+    } else {
+        AVPlayer *player = self.playerView.player;
+        if (!player || !player.currentItem) return;
+        current = CMTimeGetSeconds(player.currentTime);
+    }
     if (isnan(current)) return;
     if (current >= outro) {
         [self advanceToNextEpisode];
@@ -1111,9 +1250,43 @@ static NSCache<NSString *, NSImage *> *TVBoxWhiteSymbolCache(void) {
         }
         [self playCurrentEpisode];
     } else {
-        [self.playerView.player pause];
+        if (self.useVLC) {
+            [self.vlcPlayerView pause];
+        } else {
+            [self.playerView.player pause];
+        }
         [self updatePlayPauseButton];
     }
+}
+
+- (void)preflightURL:(NSURL *)url completion:(void (^)(BOOL reachable, NSInteger httpStatus))completion {
+    NSString *scheme = url.scheme.lowercaseString;
+    if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) {
+        if (completion) completion(YES, 0);
+        return;
+    }
+
+    NSMutableURLRequest *headRequest = [NSMutableURLRequest requestWithURL:url];
+    headRequest.HTTPMethod = @"HEAD";
+    headRequest.timeoutInterval = 5.0;
+    [headRequest setValue:TVBoxHTTPUserAgent forHTTPHeaderField:@"User-Agent"];
+    [headRequest setValue:@"*/*" forHTTPHeaderField:@"Accept"];
+
+    NSURLSession *session = [NSURLSession sharedSession];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:headRequest completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+        if (error) {
+            NSLog(@"[Preflight] HEAD %@ -> ERROR: %@", url.absoluteString, error.localizedDescription);
+            if (completion) completion(NO, 0);
+            return;
+        }
+        NSInteger status = 0;
+        if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+            status = ((NSHTTPURLResponse *)response).statusCode;
+        }
+        NSLog(@"[Preflight] HEAD %@ -> status=%ld", url.absoluteString, (long)status);
+        if (completion) completion(YES, status);
+    }];
+    [task resume];
 }
 
 @end

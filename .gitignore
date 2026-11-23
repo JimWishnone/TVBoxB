@@ -1,3 +1,10 @@
+/build/
 /cmake-build-debug/
 /.idea/
+*.xcodeproj/
+*.xcworkspace/
+.DS_Store
 /document/使用说明.md
+/tvbox-urlcache/
+install-package/*.dmg
+install-package/.DS_Store

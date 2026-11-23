@@ -3,6 +3,8 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+extern NSString * const TVBoxHTTPUserAgent;
+
 // 验证过程的进度回调：用于逐步展示“地址格式 / 可访问 / 可解析 / 数据格式校验”等详细过程
 typedef void (^TVValidateProgressBlock)(NSString * _Nullable stepMessage);
 

@@ -1,0 +1,2 @@
+third_party/vlc/**/*.dylib filter=lfs diff=lfs merge=lfs -text
+third_party/vlc/**/*.mo filter=lfs diff=lfs merge=lfs -text

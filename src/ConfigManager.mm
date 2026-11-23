@@ -1,6 +1,8 @@
 #import "ConfigManager.h"
 #import <CoreFoundation/CFStringEncodingExt.h>
 
+NSString * const TVBoxHTTPUserAgent = @"Dalvik/2.1.0 (Linux; U; Android 11; TV Box Build/RP1A.200720.009)";
+
 static NSString * const kUserConfigURLsKey = @"TVBoxUserConfigURLs";
 static NSString * const kUserLiveConfigURLsKey = @"TVBoxUserLiveConfigURLs";
 static NSString * const kUserLiveEPGURLKey = @"TVBoxUserLiveEPGURL";
@@ -580,14 +582,14 @@ static NSString *TVBoxVisitedKey(NSString *urlString) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
-        cfg.timeoutIntervalForRequest = 15.0;    // 首包超时，弱网下更宽容
-        cfg.timeoutIntervalForResource = 30.0;   // 整体资源超时
-        cfg.HTTPMaximumConnectionsPerHost = 6;   // 限制单域名并发，避免打爆慢网
-        cfg.requestCachePolicy = NSURLRequestReturnCacheDataElseLoad; // 优先命中响应缓存
+        cfg.timeoutIntervalForRequest = 8.0;
+        cfg.timeoutIntervalForResource = 12.0;
+        cfg.HTTPMaximumConnectionsPerHost = 6;
+        cfg.requestCachePolicy = NSURLRequestReturnCacheDataElseLoad;
         cfg.URLCache = [[NSURLCache alloc] initWithMemoryCapacity:8 * 1024 * 1024
                                                      diskCapacity:64 * 1024 * 1024
                                                          diskPath:@"tvbox-urlcache"];
-        cfg.waitsForConnectivity = YES;          // 无网时挂起等待恢复，而非立即超时
+        cfg.waitsForConnectivity = NO;
         session = [NSURLSession sessionWithConfiguration:cfg];
     });
     return session;
@@ -597,8 +599,8 @@ static NSString *TVBoxVisitedKey(NSString *urlString) {
 // 点播接口、直播源、EPG 均复用此实现；回调始终在主线程执行。
 - (void)requestDataFromURL:(NSURL *)url retryRemaining:(NSInteger)retryRemaining completion:(void (^)(NSData * _Nullable, NSError * _Nullable))completion {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    request.timeoutInterval = 15.0;
-    [request setValue:@"okhttp/3.15" forHTTPHeaderField:@"User-Agent"];
+    request.timeoutInterval = 8.0;
+    [request setValue:TVBoxHTTPUserAgent forHTTPHeaderField:@"User-Agent"];
 
     [[[self tvSession] dataTaskWithRequest:request
         completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
@@ -937,20 +939,24 @@ static void TVBoxEPGStoreText(NSString *text, NSString *epgURL, NSString *channe
 - (void)fetchProgramsForChannelsIndividually:(NSArray<NSString *> *)channelNames
                                       epgURL:(NSString *)epgURL
                                   completion:(void (^)(NSDictionary<NSString *, NSArray<TVLiveProgram *> *> * _Nonnull results))completion {
-    dispatch_group_t group = dispatch_group_create();
-    dispatch_semaphore_t semaphore = dispatch_semaphore_create(4);
-    NSMutableDictionary<NSString *, NSArray<TVLiveProgram *> *> *results = [NSMutableDictionary dictionary];
-    for (NSString *name in channelNames) {
-        dispatch_group_enter(group);
-        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-        [self fetchProgramsForChannel:name epgURL:epgURL completion:^(NSArray<TVLiveProgram *> * _Nullable programs) {
-            results[name] = programs ?: @[];
-            dispatch_semaphore_signal(semaphore);
-            dispatch_group_leave(group);
-        }];
-    }
-    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
-        if (completion) completion(results);
+    dispatch_queue_t bgQueue = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
+    dispatch_async(bgQueue, ^{
+        dispatch_group_t group = dispatch_group_create();
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(4);
+        NSMutableDictionary<NSString *, NSArray<TVLiveProgram *> *> *results = [NSMutableDictionary dictionary];
+        for (NSString *name in channelNames) {
+            dispatch_group_enter(group);
+            dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+            [self fetchProgramsForChannel:name epgURL:epgURL completion:^(NSArray<TVLiveProgram *> * _Nullable programs) {
+                results[name] = programs ?: @[];
+                dispatch_semaphore_signal(semaphore);
+                dispatch_group_leave(group);
+            }];
+        }
+        dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(results);
+        });
     });
 }
 

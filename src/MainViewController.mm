@@ -1,6 +1,7 @@
 #import "MainViewController.h"
 #import "ConfigManager.h"
 #import "PlayerViewController.h"
+#import "TVBoxVLCPlayerView.h"
 #import <QuartzCore/QuartzCore.h>
 #import <CoreImage/CoreImage.h>
 
@@ -97,7 +98,7 @@ static void TVBoxLoadImage(NSString *urlString, void (^completion)(NSImage * _Nu
 
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.timeoutInterval = 10.0;
-    [request setValue:@"okhttp/3.15" forHTTPHeaderField:@"User-Agent"];
+    [request setValue:TVBoxHTTPUserAgent forHTTPHeaderField:@"User-Agent"];
 
     [[[NSURLSession sharedSession] dataTaskWithRequest:request
         completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
@@ -616,6 +617,8 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 @property (nonatomic, strong) NSMutableSet<NSString *> *unavailableSourceURLs;
 @property (nonatomic, strong) NSWindow *checkingPanel;
 @property (nonatomic, assign) NSInteger availabilityCheckGeneration;
+@property (nonatomic, strong) NSWindow *vlcCheckPanel;
+@property (nonatomic, strong) NSTextField *vlcCheckStatusLabel;
 
 @property (nonatomic, strong) NSSearchField *searchField;
 @property (nonatomic, strong) NSCollectionView *searchCollectionView;
@@ -657,6 +660,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 @property (nonatomic, strong) NSTextField *liveValidationResultLabel;
 @property (nonatomic, strong) NSButton *historySaveSwitch;
 @property (nonatomic, strong) NSTextField *historyLimitField;
+@property (nonatomic, strong) NSButton *vlcPlaybackSwitch;
 
 @property (nonatomic, strong) NSTableView *historyTable;
 @property (nonatomic, strong) NSMutableArray<TVHistoryItem *> *historyItems;
@@ -1408,6 +1412,13 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     historyLimitUnit.font = [NSFont systemFontOfSize:13];
     historyLimitUnit.translatesAutoresizingMaskIntoConstraints = NO;
 
+    NSTextField *playerTitle = [NSTextField labelWithString:@"播放器"];
+    playerTitle.font = [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold];
+    playerTitle.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.vlcPlaybackSwitch = [NSButton checkboxWithTitle:@"使用 VLC 视频播放（支持更多视频格式；默认不勾选时使用系统默认播放器）" target:self action:@selector(vlcPlaybackSwitchChanged:)];
+    self.vlcPlaybackSwitch.translatesAutoresizingMaskIntoConstraints = NO;
+
     [container addSubview:title];
     [container addSubview:hintLabel];
     [container addSubview:vodTitle];
@@ -1425,6 +1436,8 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     [container addSubview:historyLimitLabel];
     [container addSubview:self.historyLimitField];
     [container addSubview:historyLimitUnit];
+    [container addSubview:playerTitle];
+    [container addSubview:self.vlcPlaybackSwitch];
 
     [NSLayoutConstraint activateConstraints:@[
         [title.topAnchor constraintEqualToAnchor:container.topAnchor constant:16],
@@ -1482,17 +1495,24 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 
         [historyLimitUnit.leadingAnchor constraintEqualToAnchor:self.historyLimitField.trailingAnchor constant:6],
         [historyLimitUnit.centerYAnchor constraintEqualToAnchor:self.historyLimitField.centerYAnchor],
+
+        [playerTitle.topAnchor constraintEqualToAnchor:historyLimitLabel.bottomAnchor constant:20],
+        [playerTitle.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
+
+        [self.vlcPlaybackSwitch.topAnchor constraintEqualToAnchor:playerTitle.bottomAnchor constant:8],
+        [self.vlcPlaybackSwitch.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:16],
+        [self.vlcPlaybackSwitch.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-16],
     ]];
 
     [self loadConfigURLRows];
     [self loadHistorySettings];
+    [self loadVLCSetting];
     return container;
 }
 
 - (NSView *)buildAboutView {
     NSView *container = [[NSView alloc] init];
 
-    // 关于页使用彩色渐变色背景，增强视觉冲击力。
     TVGradientView *background = [[TVGradientView alloc] initWithColors:@[
         [NSColor colorWithCalibratedRed:0.28 green:0.45 blue:0.96 alpha:1.0],
         [NSColor colorWithCalibratedRed:0.58 green:0.38 blue:0.96 alpha:1.0],
@@ -1506,7 +1526,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     title.textColor = [NSColor whiteColor];
     title.translatesAutoresizingMaskIntoConstraints = NO;
 
-    NSTextField *version = [NSTextField labelWithString:@"版本 v0.1.1"];
+    NSTextField *version = [NSTextField labelWithString:@"版本 v0.2.0"];
     version.textColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.85];
     version.translatesAutoresizingMaskIntoConstraints = NO;
 
@@ -1517,13 +1537,11 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     desc.alignment = NSTextAlignmentCenter;
     desc.preferredMaxLayoutWidth = 280;
 
-    // 版权信息
     NSTextField *copyright = [NSTextField labelWithString:@"版权所有 © 2026 iGruel.com"];
     copyright.textColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.70];
     copyright.font = [NSFont systemFontOfSize:12];
     copyright.translatesAutoresizingMaskIntoConstraints = NO;
 
-    // 支持邮箱（可点击复制或发送邮件）
     NSTextField *email = [NSTextField labelWithString:@"技术支持邮箱：ibmos_2@163.com"];
     email.textColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.90];
     email.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1540,7 +1558,19 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     sendEmailButton.imagePosition = NSImageLeading;
     sendEmailButton.translatesAutoresizingMaskIntoConstraints = NO;
 
-    // 资助本软件（微信扫码）
+    NSTextField *vlcTitle = [NSTextField labelWithString:@"VLC 技术支持"];
+    vlcTitle.font = [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold];
+    vlcTitle.textColor = [NSColor whiteColor];
+    vlcTitle.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSTextField *vlcDesc = [NSTextField wrappingLabelWithString:@"本软件集成了 VideoLAN 开源的 libVLC 作为可选的视频播放引擎，以支持更多视频格式。\nlibVLC 由 VideoLAN 团队开发，采用 GNU Lesser General Public License v2.1 许可发布。\n详见 https://www.videolan.org/vlc/libvlc.html"];
+    vlcDesc.textColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.85];
+    vlcDesc.font = [NSFont systemFontOfSize:12];
+    vlcDesc.alignment = NSTextAlignmentCenter;
+    vlcDesc.maximumNumberOfLines = 0;
+    vlcDesc.preferredMaxLayoutWidth = 340;
+    vlcDesc.translatesAutoresizingMaskIntoConstraints = NO;
+
     NSTextField *sponsorTitle = [NSTextField labelWithString:@"资助本软件"];
     sponsorTitle.font = [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold];
     sponsorTitle.textColor = [NSColor whiteColor];
@@ -1575,6 +1605,8 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     [container addSubview:email];
     [container addSubview:copyEmailButton];
     [container addSubview:sendEmailButton];
+    [container addSubview:vlcTitle];
+    [container addSubview:vlcDesc];
     [container addSubview:sponsorTitle];
     [container addSubview:sponsorDesc];
     [container addSubview:qrCodeView];
@@ -1607,7 +1639,14 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
         [sendEmailButton.topAnchor constraintEqualToAnchor:email.bottomAnchor constant:6],
         [sendEmailButton.leadingAnchor constraintEqualToAnchor:container.centerXAnchor constant:4],
 
-        [sponsorTitle.topAnchor constraintEqualToAnchor:copyEmailButton.bottomAnchor constant:24],
+        [vlcTitle.topAnchor constraintEqualToAnchor:copyEmailButton.bottomAnchor constant:20],
+        [vlcTitle.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+
+        [vlcDesc.topAnchor constraintEqualToAnchor:vlcTitle.bottomAnchor constant:6],
+        [vlcDesc.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:40],
+        [vlcDesc.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-40],
+
+        [sponsorTitle.topAnchor constraintEqualToAnchor:vlcDesc.bottomAnchor constant:18],
         [sponsorTitle.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
 
         [sponsorDesc.topAnchor constraintEqualToAnchor:sponsorTitle.bottomAnchor constant:8],
@@ -1719,6 +1758,8 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
         [self setStatus:@""];
         [self.unavailableSourceURLs removeAllObjects];
         [self rebuildDataSources];
+        [self rebuildSites];
+        [self rebuildLiveSources];
     }];
 }
 
@@ -1786,11 +1827,13 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     }
     self.sourceRows = rows;
     [self.sourcesTable reloadData];
-    [self checkDataSourcesAvailability];
+    [self checkDataSourcesAvailabilityInteractive:YES];
 }
 
-- (void)checkDataSourcesAvailability {
-    [self showCheckingPanel];
+- (void)checkDataSourcesAvailabilityInteractive:(BOOL)interactive {
+    if (interactive) {
+        [self showCheckingPanel];
+    }
     self.availabilityCheckGeneration++;
     NSInteger generation = self.availabilityCheckGeneration;
 
@@ -1809,9 +1852,18 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
         if (generation != self.availabilityCheckGeneration) return;
         [self sortUnavailableSourcesToEnd];
-        [self hideCheckingPanel];
         [self rebuildSites];
         [self rebuildLiveSources];
+        if (interactive) [self hideCheckingPanel];
+    });
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(interactive ? 10.0 : 8.0) * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{
+        if (generation != self.availabilityCheckGeneration) return;
+        [self sortUnavailableSourcesToEnd];
+        [self rebuildSites];
+        [self rebuildLiveSources];
+        if (interactive) [self hideCheckingPanel];
     });
 }
 
@@ -1825,18 +1877,45 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
         if (completion) completion(@"不可用");
         return;
     }
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    request.timeoutInterval = 10;
-    request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-    [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        NSInteger statusCode = 200;
-        if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-            statusCode = ((NSHTTPURLResponse *)response).statusCode;
-        }
-        BOOL available = (error == nil && statusCode >= 200 && statusCode < 300);
-        NSString *status = available ? @"可用" : @"不可用";
-        if (completion) completion(status);
-    }] resume];
+    NSMutableURLRequest *headRequest = [NSMutableURLRequest requestWithURL:url];
+    headRequest.HTTPMethod = @"HEAD";
+    headRequest.timeoutInterval = 5.0;
+    headRequest.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    [headRequest setValue:TVBoxHTTPUserAgent forHTTPHeaderField:@"User-Agent"];
+    [headRequest setValue:@"*/*" forHTTPHeaderField:@"Accept"];
+
+    NSURLSessionDataTask *headTask = [[NSURLSession sharedSession] dataTaskWithRequest:headRequest
+        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable headError) {
+            NSInteger statusCode = -1;
+            if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                statusCode = ((NSHTTPURLResponse *)response).statusCode;
+            }
+            if (headError == nil && statusCode >= 200 && statusCode < 300) {
+                if (completion) completion(@"可用");
+                return;
+            }
+            if (statusCode == 405) {
+                NSMutableURLRequest *getRequest = [NSMutableURLRequest requestWithURL:url];
+                getRequest.HTTPMethod = @"GET";
+                getRequest.timeoutInterval = 5.0;
+                getRequest.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+                [getRequest setValue:TVBoxHTTPUserAgent forHTTPHeaderField:@"User-Agent"];
+                [getRequest setValue:@"*/*" forHTTPHeaderField:@"Accept"];
+
+                [[[NSURLSession sharedSession] dataTaskWithRequest:getRequest
+                    completionHandler:^(NSData * _Nullable getData, NSURLResponse * _Nullable getResponse, NSError * _Nullable getError) {
+                        NSInteger getStatusCode = -1;
+                        if ([getResponse isKindOfClass:[NSHTTPURLResponse class]]) {
+                            getStatusCode = ((NSHTTPURLResponse *)getResponse).statusCode;
+                        }
+                        BOOL available = (getError == nil && getStatusCode >= 200 && getStatusCode < 300);
+                        if (completion) completion(available ? @"可用" : @"不可用");
+                    }] resume];
+                return;
+            }
+            if (completion) completion(@"不可用");
+        }];
+    [headTask resume];
 }
 
 - (void)updateSourceRowStatus:(NSString *)status forURL:(NSString *)urlString generation:(NSInteger)generation {
@@ -2830,6 +2909,17 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     [self setStatus:@"正在加载并合并直播源…"];
     __block NSInteger remaining = (NSInteger)targetSources.count;
     __block NSMutableArray<NSDictionary *> *collected = [NSMutableArray array];
+    __block BOOL mergeDone = NO;
+
+    void (^finishMerge)(void) = ^{
+        if (mergeDone) return;
+        mergeDone = YES;
+        self.liveChannels = [self mergeLiveChannels:collected];
+        [self rebuildLiveGroupPopup];
+        [self applyLiveFilterAndSort];
+        [self setStatus:@""];
+        [self loadProgramSchedulesForChannels:self.liveChannels];
+    };
 
     for (TVLiveSource *source in targetSources) {
         TVLiveSource *sourceForRequest = source;
@@ -2849,14 +2939,22 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
             }
             remaining--;
             if (remaining <= 0) {
-                self.liveChannels = [self mergeLiveChannels:collected];
-                [self rebuildLiveGroupPopup];
-                [self applyLiveFilterAndSort];
-                [self setStatus:@""];
-                [self loadProgramSchedulesForChannels:self.liveChannels];
+                finishMerge();
             }
         }];
     }
+
+    if (remaining <= 0) {
+        finishMerge();
+        return;
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (!mergeDone) {
+            finishMerge();
+        }
+    });
 }
 
 // 当前直播场景使用的 EPG 地址：优先取选中的直播源，否则取第一个携带 epg 的可用直播源
@@ -3295,6 +3393,9 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 
 - (void)refreshDataSourcesAction:(id)sender {
     [self reloadConfig];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self checkDataSourcesAvailabilityInteractive:YES];
+    });
 }
 
 - (void)loadConfigURLRows {
@@ -3354,6 +3455,86 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     NSInteger limit = [defaults integerForKey:kTVBoxHistoryLimitKey];
     if (limit < 1) limit = 1;
     return (NSUInteger)limit;
+}
+
+static NSString * const kTVBoxUseVLCKey = @"TVBoxUseVLCPlayback";
+
+- (void)loadVLCSetting {
+    BOOL useVLC = [[NSUserDefaults standardUserDefaults] boolForKey:kTVBoxUseVLCKey];
+    self.vlcPlaybackSwitch.state = useVLC ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+- (void)vlcPlaybackSwitchChanged:(id)sender {
+    BOOL enabled = (self.vlcPlaybackSwitch.state == NSControlStateValueOn);
+    if (!enabled) {
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kTVBoxUseVLCKey];
+        return;
+    }
+    [self showVLCCheckPanel];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        BOOL capable = [TVBoxVLCPlayerView checkVLCCapable];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self hideVLCCheckPanel];
+            if (capable) {
+                [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kTVBoxUseVLCKey];
+            } else {
+                self.vlcPlaybackSwitch.state = NSControlStateValueOff;
+                [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kTVBoxUseVLCKey];
+                NSAlert *alert = [[NSAlert alloc] init];
+                alert.alertStyle = NSAlertStyleCritical;
+                alert.messageText = @"VLC 视频播放能力检查失败";
+                alert.informativeText = @"未检测到可用的 VLC 视频播放能力。本软件已集成 VLC 播放组件（位于 App Bundle 内），若出现此问题可能是集成文件已损坏或丢失。请尝试重新编译构建，或将 /Applications/TVBoxB.app 删除后重新生成。若已单独安装 VLC 媒体播放器到 /Applications/VLC.app，也可作为备选方案。";
+                [alert addButtonWithTitle:@"好的"];
+                [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+            }
+        });
+    });
+}
+
+- (void)showVLCCheckPanel {
+    if (self.vlcCheckPanel) return;
+    NSWindow *parent = self.view.window;
+    if (!parent) return;
+
+    NSWindow *panel = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 380, 140)
+                                                   styleMask:NSWindowStyleMaskTitled
+                                                     backing:NSBackingStoreBuffered
+                                                       defer:NO];
+    panel.title = @"检查中";
+    panel.releasedWhenClosed = NO;
+
+    NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 380, 140)];
+
+    NSProgressIndicator *spinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(24, 86, 24, 24)];
+    spinner.style = NSProgressIndicatorStyleSpinning;
+    [spinner startAnimation:nil];
+
+    NSTextField *titleLabel = [NSTextField labelWithString:@"正在检查 VLC 视频播放能力…"];
+    titleLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
+    titleLabel.frame = NSMakeRect(56, 90, 300, 20);
+
+    NSTextField *statusLabel = [NSTextField labelWithString:@"正在检测内置 VLC 播放组件…"];
+    statusLabel.font = [NSFont systemFontOfSize:12];
+    statusLabel.textColor = [NSColor secondaryLabelColor];
+    statusLabel.frame = NSMakeRect(56, 64, 300, 18);
+    self.vlcCheckStatusLabel = statusLabel;
+
+    [content addSubview:spinner];
+    [content addSubview:titleLabel];
+    [content addSubview:statusLabel];
+    panel.contentView = content;
+
+    self.vlcCheckPanel = panel;
+    [parent beginSheet:panel completionHandler:nil];
+}
+
+- (void)hideVLCCheckPanel {
+    if (self.vlcCheckPanel) {
+        NSWindow *panel = self.vlcCheckPanel;
+        self.vlcCheckPanel = nil;
+        self.vlcCheckStatusLabel = nil;
+        [self.view.window endSheet:panel];
+    }
 }
 
 - (void)saveConfigURLAction:(id)sender {
