@@ -106,6 +106,7 @@ static void TVBoxVLCInitInstance(void) {
 @property (nonatomic, assign) libvlc_media_player_t *player;
 @property (nonatomic, assign) libvlc_media_t *media;
 @property (nonatomic, assign) BOOL outputBound;
+@property (nonatomic, assign) BOOL eventsDetached;
 @end
 
 @implementation TVBoxVLCPlayerView {
@@ -189,7 +190,19 @@ static void TVBoxVLCInitInstance(void) {
     return _player != NULL;
 }
 
+- (void)detachEventListenersIfNeeded {
+    if (!_player || _eventsDetached) return;
+    libvlc_event_manager_t *em = libvlc_media_player_event_manager(_player);
+    libvlc_event_detach(em, libvlc_MediaPlayerEncounteredError, TVBoxVLCPlayerEventCallback, (__bridge void *)self);
+    libvlc_event_detach(em, libvlc_MediaPlayerPlaying, TVBoxVLCPlayerEventCallback, (__bridge void *)self);
+    libvlc_event_detach(em, libvlc_MediaPlayerStopped, TVBoxVLCPlayerEventCallback, (__bridge void *)self);
+    libvlc_event_detach(em, libvlc_MediaPlayerEndReached, TVBoxVLCPlayerEventCallback, (__bridge void *)self);
+    libvlc_event_detach(em, libvlc_MediaPlayerPaused, TVBoxVLCPlayerEventCallback, (__bridge void *)self);
+    _eventsDetached = YES;
+}
+
 - (void)dealloc {
+    [self detachEventListenersIfNeeded];
     if (_media) {
         libvlc_media_release(_media);
         _media = NULL;

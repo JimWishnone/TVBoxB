@@ -36,6 +36,10 @@ add_executable(TVBoxB
     src/PlayerViewController.mm
     src/TVBoxVLCPlayerView.mm
     src/TVBoxVLCPlayerView.h
+    src/TVImageLoader.mm
+    src/TVImageLoader.h
+    src/TVLiveSourceParser.mm
+    src/TVLiveSourceParser.h
 )
 
 set(MACOSX_BUNDLE_ICON_FILE "AppIcon.icns")
@@ -66,8 +70,8 @@ set_target_properties(TVBoxB PROPERTIES
     MACOSX_BUNDLE TRUE
     MACOSX_BUNDLE_GUI_IDENTIFIER "com.tvboxb.player"
     MACOSX_BUNDLE_BUNDLE_NAME "TVBoxB"
-    MACOSX_BUNDLE_BUNDLE_VERSION "0.2.0"
-    MACOSX_BUNDLE_SHORT_VERSION_STRING "0.2.0"
+    MACOSX_BUNDLE_BUNDLE_VERSION "0.2.1"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "0.2.1"
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"
     BUILD_RPATH "@loader_path/../Frameworks/vlc/lib"
     INSTALL_RPATH "@loader_path/../Frameworks/vlc/lib"

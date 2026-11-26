@@ -2,6 +2,8 @@
 #import "ConfigManager.h"
 #import "PlayerViewController.h"
 #import "TVBoxVLCPlayerView.h"
+#import "TVImageLoader.h"
+#import "TVLiveSourceParser.h"
 #import <QuartzCore/QuartzCore.h>
 #import <CoreImage/CoreImage.h>
 
@@ -14,112 +16,6 @@ static NSString *const kTVBoxSearchKeywordsKey = @"TVBoxSearchKeywords";
 static NSString *const kTVBoxFavoriteDragType = @"com.TVBox.favorite.drag";
 static const NSUInteger kTVBoxHistoryLimit = 30;
 static const NSUInteger kTVBoxSearchKeywordsLimit = 12;
-
-#pragma mark - 图片缓存
-
-// 全局图片内存缓存，避免列表滚动时对同一海报/图标反复发起网络请求。
-static NSCache<NSString *, NSImage *> *TVBoxImageCache(void) {
-    static NSCache *cache = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        cache = [[NSCache alloc] init];
-        cache.countLimit = 600;
-    });
-    return cache;
-}
-
-// 进行中的请求登记表：同一 URL 只允许一个请求在途，其余调用方仅登记回调等待结果。
-static NSMutableDictionary<NSString *, NSMutableArray<void (^)(NSImage * _Nullable)> *> *TVBoxInFlightImageRequests(void) {
-    static NSMutableDictionary *requests = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        requests = [NSMutableDictionary dictionary];
-    });
-    return requests;
-}
-
-// 图片磁盘缓存目录：~/Library/Caches/TVBox/ImageCache，持久化已下载的海报/图标，重启后无需重新下载。
-static NSString *TVBoxImageDiskDirectory(void) {
-    static NSString *dir = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSString *caches = [NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) firstObject];
-        dir = [[caches stringByAppendingPathComponent:@"TVBox"] stringByAppendingPathComponent:@"ImageCache"];
-        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-    });
-    return dir;
-}
-
-static NSString *TVBoxImageDiskPath(NSString *urlString) {
-    return [TVBoxImageDiskDirectory() stringByAppendingPathComponent:[TVBoxHexHash(urlString) stringByAppendingString:@".img"]];
-}
-
-// 异步加载图片：命中内存/磁盘缓存直接回调（主线程）；未命中则请求网络，缓存结果并回调。
-// 所有回调统一在主线程触发，调用方仍需自行判断 cell 是否已被复用。
-static void TVBoxLoadImage(NSString *urlString, void (^completion)(NSImage * _Nullable image)) {
-    if (urlString.length == 0) {
-        if (completion) completion(nil);
-        return;
-    }
-    NSCache<NSString *, NSImage *> *cache = TVBoxImageCache();
-    NSImage *cached = [cache objectForKey:urlString];
-    if (cached) {
-        if (completion) completion(cached);
-        return;
-    }
-
-    // 内存未命中时读取磁盘缓存，命中后回填内存缓存
-    NSData *diskData = [NSData dataWithContentsOfFile:TVBoxImageDiskPath(urlString)];
-    if (diskData) {
-        NSImage *diskImage = [[NSImage alloc] initWithData:diskData];
-        if (diskImage) {
-            [cache setObject:diskImage forKey:urlString];
-            if (completion) completion(diskImage);
-            return;
-        }
-    }
-
-    NSURL *url = [NSURL URLWithString:urlString];
-    if (!url) {
-        if (completion) completion(nil);
-        return;
-    }
-
-    NSMutableDictionary<NSString *, NSMutableArray<void (^)(NSImage * _Nullable)> *> *inFlight = TVBoxInFlightImageRequests();
-    NSMutableArray<void (^)(NSImage * _Nullable)> *waiters = inFlight[urlString];
-    if (waiters) {
-        // 相同 URL 已有请求在途，仅登记回调，避免重复下载。
-        if (completion) [waiters addObject:[completion copy]];
-        return;
-    }
-    waiters = [NSMutableArray array];
-    if (completion) [waiters addObject:[completion copy]];
-    inFlight[urlString] = waiters;
-
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    request.timeoutInterval = 10.0;
-    [request setValue:TVBoxHTTPUserAgent forHTTPHeaderField:@"User-Agent"];
-
-    [[[NSURLSession sharedSession] dataTaskWithRequest:request
-        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-            NSImage *image = nil;
-            if (!error && data) {
-                image = [[NSImage alloc] initWithData:data];
-            }
-            if (image) {
-                [cache setObject:image forKey:urlString];
-                // 下载成功后写入磁盘缓存，供下次启动直接使用
-                [data writeToFile:TVBoxImageDiskPath(urlString) atomically:YES];
-            }
-            dispatch_async(dispatch_get_main_queue(), ^{
-                NSArray<void (^)(NSImage * _Nullable)> *callbacks = [inFlight[urlString] copy];
-                [inFlight removeObjectForKey:urlString];
-                for (void (^block)(NSImage * _Nullable) in callbacks) {
-                    block(image);
-                }
-            });
-        }] resume];
-}
 
 @interface TVPosterImageView : NSImageView
 @end
@@ -575,11 +471,11 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     self.posterView.image = [VODCollectionItem defaultPosterImage];
 
     if (urlString.length == 0) return;
-    TVBoxLoadImage(urlString, ^(NSImage * _Nullable image) {
+    [TVImageLoader loadImageAtURL:urlString completion:^(NSImage * _Nullable image) {
         if ([self.posterURLString isEqualToString:urlString]) {
             self.posterView.image = image ?: [VODCollectionItem defaultPosterImage];
         }
-    });
+    }];
 }
 
 - (void)setSelected:(BOOL)selected {
@@ -1526,7 +1422,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
     title.textColor = [NSColor whiteColor];
     title.translatesAutoresizingMaskIntoConstraints = NO;
 
-    NSTextField *version = [NSTextField labelWithString:@"版本 v0.2.0"];
+    NSTextField *version = [NSTextField labelWithString:[NSString stringWithFormat:@"版本 v%@", [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"0.0.0"]];
     version.textColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.85];
     version.translatesAutoresizingMaskIntoConstraints = NO;
 
@@ -2824,9 +2720,9 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
 - (void)loadPosterImage:(NSString *)urlString into:(NSImageView *)imageView {
     imageView.image = [VODCollectionItem defaultPosterImage];
     if (urlString.length == 0) return;
-    TVBoxLoadImage(urlString, ^(NSImage * _Nullable image) {
+    [TVImageLoader loadImageAtURL:urlString completion:^(NSImage * _Nullable image) {
         imageView.image = image ?: [VODCollectionItem defaultPosterImage];
-    });
+    }];
 }
 
 // 以 HTML 格式解释简介内容，支持 <br>、<p>、<b>、<i> 等标签
@@ -2930,7 +2826,7 @@ static NSUInteger TVLevenshteinDistance(NSString *a, NSString *b) {
         }
         [self.config fetchStringFromURL:url completion:^(NSString * _Nullable text, NSError * _Nullable error) {
             if (!error && text.length > 0) {
-                for (TVLiveChannel *channel in [self.config parseLiveChannelsFromText:text]) {
+                for (TVLiveChannel *channel in [TVLiveSourceParser parseLiveChannelsFromText:text]) {
                     NSString *logo = [self liveLogoForChannel:channel source:sourceForRequest];
                     [collected addObject:@{@"channel": channel,
                                            @"sourceName": sourceForRequest.name ?: @"",
@@ -4523,11 +4419,11 @@ static NSString * const kTVBoxUseVLCKey = @"TVBoxUseVLCPlayback";
 
 - (void)loadLiveLogoForChannel:(TVLiveChannel *)channel intoCell:(TVLiveIconCell *)cell {
     if (channel.logo.length == 0) return;
-    TVBoxLoadImage(channel.logo, ^(NSImage * _Nullable image) {
+    [TVImageLoader loadImageAtURL:channel.logo completion:^(NSImage * _Nullable image) {
         if (image && [cell.channelKey isEqualToString:channel.name]) {
             cell.iconView.image = image;
         }
-    });
+    }];
 }
 
 #pragma mark - NSTableViewDelegate

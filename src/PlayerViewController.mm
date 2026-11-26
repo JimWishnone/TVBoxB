@@ -315,20 +315,32 @@ static NSString * const kTVBoxUseVLCKey = @"TVBoxUseVLCPlayback";
     self.topScrimLayer.frame = self.topTitleOverlay.bounds;
 }
 
-- (void)dealloc {
-    [[NSNotificationCenter defaultCenter] removeObserver:self];
-    [self.stallRecoveryTimer invalidate];
-    self.stallRecoveryTimer = nil;
-    if (self.keyMonitor) {
-        [NSEvent removeMonitor:self.keyMonitor];
-        self.keyMonitor = nil;
-    }
+- (void)_cleanupAVPlayerItem {
     if (self.currentItem) {
         [self.currentItem removeObserver:self forKeyPath:@"status" context:PlayerItemStatusContext];
         [self.currentItem removeObserver:self forKeyPath:@"playbackBufferEmpty" context:PlayerBufferContext];
         [self.currentItem removeObserver:self forKeyPath:@"playbackLikelyToKeepUp" context:PlayerBufferContext];
+        [[NSNotificationCenter defaultCenter] removeObserver:self name:AVPlayerItemDidPlayToEndTimeNotification object:self.currentItem];
+        [[NSNotificationCenter defaultCenter] removeObserver:self name:AVPlayerItemPlaybackStalledNotification object:self.currentItem];
         self.currentItem = nil;
     }
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self.stallRecoveryTimer invalidate];
+    self.stallRecoveryTimer = nil;
+    [self.vlcTickTimer invalidate];
+    self.vlcTickTimer = nil;
+    if (self.keyMonitor) {
+        [NSEvent removeMonitor:self.keyMonitor];
+        self.keyMonitor = nil;
+    }
+    if (self.playbackTimeObserver) {
+        [self.playerView.player removeTimeObserver:self.playbackTimeObserver];
+        self.playbackTimeObserver = nil;
+    }
+    [self _cleanupAVPlayerItem];
 }
 
 - (void)viewWillAppear {
@@ -650,14 +662,7 @@ static NSCache<NSString *, NSImage *> *TVBoxWhiteSymbolCache(void) {
         self.playerView.player = nil;
         [self.stallRecoveryTimer invalidate];
         self.stallRecoveryTimer = nil;
-        if (self.currentItem) {
-            [self.currentItem removeObserver:self forKeyPath:@"status" context:PlayerItemStatusContext];
-            [self.currentItem removeObserver:self forKeyPath:@"playbackBufferEmpty" context:PlayerBufferContext];
-            [self.currentItem removeObserver:self forKeyPath:@"playbackLikelyToKeepUp" context:PlayerBufferContext];
-            [[NSNotificationCenter defaultCenter] removeObserver:self name:AVPlayerItemDidPlayToEndTimeNotification object:self.currentItem];
-            [[NSNotificationCenter defaultCenter] removeObserver:self name:AVPlayerItemPlaybackStalledNotification object:self.currentItem];
-            self.currentItem = nil;
-        }
+        [self _cleanupAVPlayerItem];
     }
     [self setLoadingVisible:NO];
     [self updatePlayPauseButton];
@@ -841,14 +846,7 @@ static NSCache<NSString *, NSImage *> *TVBoxWhiteSymbolCache(void) {
         return;
     }
 
-    if (self.currentItem) {
-        [self.currentItem removeObserver:self forKeyPath:@"status" context:PlayerItemStatusContext];
-        [self.currentItem removeObserver:self forKeyPath:@"playbackBufferEmpty" context:PlayerBufferContext];
-        [self.currentItem removeObserver:self forKeyPath:@"playbackLikelyToKeepUp" context:PlayerBufferContext];
-        [[NSNotificationCenter defaultCenter] removeObserver:self name:AVPlayerItemDidPlayToEndTimeNotification object:self.currentItem];
-        [[NSNotificationCenter defaultCenter] removeObserver:self name:AVPlayerItemPlaybackStalledNotification object:self.currentItem];
-        self.currentItem = nil;
-    }
+    [self _cleanupAVPlayerItem];
 
     AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
     item.preferredForwardBufferDuration = (self.video != nil) ? 30.0 : 3.0;
