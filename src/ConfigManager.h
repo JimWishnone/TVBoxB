@@ -65,6 +65,9 @@ typedef void (^TVValidateProgressBlock)(NSString * _Nullable stepMessage);
 // 根据站点接口与查询参数构造 URL（自动合并、覆盖已有 query 项）
 - (NSURL *)vodURLForSite:(TVSite *)site params:(NSDictionary<NSString *, NSString *> *)params;
 
+@end
+
+@interface ConfigManager (EPG)
 
 // 拉取并解析某个频道的节目单（EPG），支持 DIYP JSON 与 XMLTV XML 两种格式；完成回调始终在主线程执行
 - (void)fetchProgramsForChannel:(NSString *)channelName

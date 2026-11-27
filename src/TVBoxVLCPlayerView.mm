@@ -62,16 +62,42 @@ static void TVBoxVLCPlayerEventCallback(const struct libvlc_event_t *event, void
             break;
         case libvlc_MediaPlayerEndReached:
             NSLog(@"[TVBoxVLC] MediaPlayerEndReached");
+            if (self.onPlaybackEnded) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    self.onPlaybackEnded();
+                });
+            }
             break;
-        case libvlc_MediaPlayerStopped:
+        case libvlc_MediaPlayerStopped: {
             NSLog(@"[TVBoxVLC] MediaPlayerStopped");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self.paused = YES;
+                if (self.onPlaybackStateChanged) {
+                    self.onPlaybackStateChanged(YES);
+                }
+            });
             break;
-        case libvlc_MediaPlayerPlaying:
+        }
+        case libvlc_MediaPlayerPlaying: {
             NSLog(@"[TVBoxVLC] MediaPlayerPlaying");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self.paused = NO;
+                if (self.onPlaybackStateChanged) {
+                    self.onPlaybackStateChanged(NO);
+                }
+            });
             break;
-        case libvlc_MediaPlayerPaused:
+        }
+        case libvlc_MediaPlayerPaused: {
             NSLog(@"[TVBoxVLC] MediaPlayerPaused");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self.paused = YES;
+                if (self.onPlaybackStateChanged) {
+                    self.onPlaybackStateChanged(YES);
+                }
+            });
             break;
+        }
         default:
             break;
     }

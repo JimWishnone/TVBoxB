@@ -32,14 +32,35 @@ add_executable(TVBoxB
     src/AppDelegate.mm
     src/Models.mm
     src/ConfigManager.mm
+    src/ConfigManager+EPG.mm
     src/MainViewController.mm
+    src/MainViewController+UI.mm
+    src/MainViewController+UILive.mm
+    src/MainViewController+UISettings.mm
+    src/MainViewController+UIAbout.mm
+    src/MainViewController+DataSources.mm
+    src/MainViewController+VOD.mm
+    src/MainViewController+Search.mm
+    src/MainViewController+Live.mm
+    src/MainViewController+Settings.mm
+    src/MainViewController+Library.mm
+    src/MainViewController+Tables.mm
     src/PlayerViewController.mm
+    src/PlayerViewController+Skip.mm
+    src/PlayerViewController+Playback.mm
+    src/PlayerViewController+Network.mm
     src/TVBoxVLCPlayerView.mm
     src/TVBoxVLCPlayerView.h
     src/TVImageLoader.mm
     src/TVImageLoader.h
     src/TVLiveSourceParser.mm
     src/TVLiveSourceParser.h
+    src/TVTableCellViews.mm
+    src/TVTableCellViews.h
+    src/TVVideoCardViews.mm
+    src/TVVideoCardViews.h
+        src/MainViewController+Private.h
+        src/PlayerViewController+Private.h
 )
 
 set(MACOSX_BUNDLE_ICON_FILE "AppIcon.icns")

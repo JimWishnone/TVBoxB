@@ -8,6 +8,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) float rate;
 @property (nonatomic, assign) BOOL paused;
 @property (nonatomic, copy, nullable) void (^onPlaybackError)(void);
+@property (nonatomic, copy, nullable) void (^onPlaybackEnded)(void);
+@property (nonatomic, copy, nullable) void (^onPlaybackStateChanged)(BOOL paused);
 
 + (BOOL)vlcAvailable;
 + (BOOL)checkVLCCapable;
